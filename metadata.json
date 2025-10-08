@@ -1,0 +1,5 @@
+{
+  "name": "Interactive 3D Minecraft World",
+  "description": "An enhanced 3D scene inspired by Minecraft, built with React and three.js. The character now stands correctly on the ground, and the scene includes aesthetic improvements and a more robust, well-structured React component architecture.",
+  "requestFramePermissions": []
+}
