@@ -36,6 +36,13 @@ const App: React.FC = () => {
     shirtColor: '#00CED1',
     pantsColor: '#3B5998',
   });
+  const [interacted, setInteracted] = useState(false);
+
+  const handleInteraction = useCallback(() => {
+    if (!interacted) {
+      setInteracted(true);
+    }
+  }, [interacted]);
 
   const handleJump = useCallback(() => {
     setIsJumping(true);
@@ -57,7 +64,10 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-gray-900 text-white flex flex-col font-sans">
       <Header />
       <main className="flex-grow flex items-center justify-center p-4">
-        <div className="w-full h-[calc(100vh-144px)] relative bg-black rounded-lg overflow-hidden shadow-2xl shadow-cyan-500/20">
+        <div 
+          className="w-full h-[calc(100vh-144px)] relative bg-black rounded-lg overflow-hidden shadow-2xl shadow-cyan-500/20"
+          onClick={handleInteraction}
+        >
           <MinecraftScene 
             move={move} 
             isJumping={isJumping} 
@@ -65,6 +75,7 @@ const App: React.FC = () => {
             cameraMode={cameraMode}
             characterAppearance={characterAppearance}
             onCameraToggle={handleCameraToggle}
+            interacted={interacted}
           />
           <Controls onMove={setMove} onJump={handleJump} />
           <CameraSwitcher onToggle={handleCameraToggle} cameraMode={cameraMode} />

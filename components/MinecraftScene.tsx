@@ -13,16 +13,17 @@ const TREE_DENSITY = 0.1;
 const BUSH_DENSITY = 0.08;
 const DIRT_PATCH_DENSITY = 0.15;
 const BIRD_TREE_CHANCE = 0.4;
-const NEST_CHANCE = 0.3; // 30% of trees with birds will have a nest
+const NEST_CHANCE = 0.3;
+const VILLAGE_DENSITY = 0.04; // Chance per chunk to spawn a village
 
 // --- Game Constants ---
 const PLAYER_SPEED = 5;
 const PLAYER_ROTATION_SPEED = 3;
 const GRAVITY = 30;
 const JUMP_FORCE = 10;
-const CAMERA_OFFSET = new THREE.Vector3(0, 10, -21); // Lowered the camera
-const DAY_NIGHT_CYCLE_SECONDS = 300; // A full day-night cycle lasts 5 minutes
-const START_TIME_OFFSET = DAY_NIGHT_CYCLE_SECONDS * 0.35; // Start in the morning
+const CAMERA_OFFSET = new THREE.Vector3(0, 12, -28);
+const DAY_NIGHT_CYCLE_SECONDS = 300;
+const START_TIME_OFFSET = DAY_NIGHT_CYCLE_SECONDS * 0.35;
 const MOON_LAYER = 1;
 const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 const MOUSE_SENSITIVITY = 0.002;
@@ -36,6 +37,11 @@ const BIRD_SEPARATION_DISTANCE = 5;
 const BIRD_ALIGNMENT_WEIGHT = 1.0;
 const BIRD_COHESION_WEIGHT = 1.0;
 const BIRD_SEPARATION_WEIGHT = 1.5;
+
+// --- Villager AI Constants ---
+const VILLAGER_SPEED = 1.5;
+const VILLAGER_INTERACTION_RADIUS = 8;
+type VillagerProfession = 'farmer' | 'librarian' | 'blacksmith' | 'nitwit';
 
 
 // --- Day/Night Cycle Colors & Intensities ---
@@ -53,7 +59,7 @@ const keyframes = [
 // --- Procedural Texture Generators ---
 const createGroundTexture = (baseColor: string): THREE.CanvasTexture => {
     const canvas = document.createElement('canvas');
-    const size = 32; // Low-res pixelated look
+    const size = 32;
     canvas.width = size;
     canvas.height = size;
     const context = canvas.getContext('2d')!;
@@ -66,16 +72,16 @@ const createGroundTexture = (baseColor: string): THREE.CanvasTexture => {
     const data = imageData.data;
 
     for (let i = 0; i < data.length; i += 4) {
-        const variation = (Math.random() - 0.5) * 40; // a bit of noise
+        const variation = (Math.random() - 0.5) * 40;
         data[i] = Math.max(0, Math.min(255, baseR + variation));
         data[i + 1] = Math.max(0, Math.min(255, baseG + variation));
         data[i + 2] = Math.max(0, Math.min(255, baseB + variation));
-        data[i + 3] = 255; // Alpha
+        data[i + 3] = 255;
     }
 
     context.putImageData(imageData, 0, 0);
     const texture = new THREE.CanvasTexture(canvas);
-    texture.magFilter = THREE.NearestFilter; // Crucial for pixelated look
+    texture.magFilter = THREE.NearestFilter;
     texture.minFilter = THREE.NearestFilter;
     texture.needsUpdate = true;
     return texture;
@@ -89,11 +95,9 @@ const createMoonTexture = (): THREE.CanvasTexture => {
     canvas.height = size;
     const ctx = canvas.getContext('2d')!;
 
-    // Base moon color
     ctx.fillStyle = '#c0c0c0';
     ctx.fillRect(0, 0, size, size);
 
-    // Add some noise for texture
     const imageData = ctx.getImageData(0, 0, size, size);
     const data = imageData.data;
     for (let i = 0; i < data.length; i += 4) {
@@ -104,7 +108,6 @@ const createMoonTexture = (): THREE.CanvasTexture => {
     }
     ctx.putImageData(imageData, 0, 0);
 
-    // Create some large, dark 'seas' (maria)
     for (let i = 0; i < 7; i++) {
         ctx.fillStyle = `rgba(0, 0, 0, ${Math.random() * 0.1 + 0.1})`;
         ctx.beginPath();
@@ -119,30 +122,26 @@ const createMoonTexture = (): THREE.CanvasTexture => {
         ctx.fill();
     }
 
-    // Function to draw a crater
     const drawCrater = (x: number, y: number, r: number) => {
         const angle = Math.random() * Math.PI * 2;
         const highlightOffset = 0.2 * r;
 
-        // Shadow
         ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
         ctx.fill();
 
-        // Highlight on the opposite side
         ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
         ctx.beginPath();
         ctx.arc(x + Math.cos(angle) * highlightOffset, y + Math.sin(angle) * highlightOffset, r * 0.8, 0, Math.PI * 2);
         ctx.fill();
     };
 
-    // Draw lots of craters
     for (let i = 0; i < 300; i++) {
         drawCrater(
             Math.random() * size,
             Math.random() * size,
-            Math.random() * size * 0.04 + 2 // radius from 2 to ~22
+            Math.random() * size * 0.04 + 2
         );
     }
     
@@ -182,40 +181,18 @@ const dirtMaterial = new THREE.MeshLambertMaterial({ map: dirtTexture });
 const nestMaterial = new THREE.MeshLambertMaterial({ color: 0x8B5F47 });
 const nestTwigGeo = new THREE.BoxGeometry(0.2, 0.2, 1.5);
 
-// --- New Bird Component Geometries & Materials ---
+// --- Bird Component Geometries & Materials ---
 const birdBodyGeo = new THREE.BufferGeometry();
-const bodyVertices = new Float32Array([
-    // Top (blue)
-    0, 0.2, 0.3,   // 0: back top
-    0.3, 0, 0,     // 1: right shoulder
-    -0.3, 0, 0,    // 2: left shoulder
-    0, 0.25, -0.4, // 3: head top
-    // Bottom (yellow)
-    0, -0.2, 0.5,  // 4: tail bottom
-    0, -0.25, -0.2, // 5: belly
-]);
+const bodyVertices = new Float32Array([0, 0.2, 0.3, 0.3, 0, 0, -0.3, 0, 0, 0, 0.25, -0.4, 0, -0.2, 0.5, 0, -0.25, -0.2]);
 birdBodyGeo.setAttribute('position', new THREE.BufferAttribute(bodyVertices, 3));
-const bodyIndices = [
-    // Top Blue Part
-    0, 1, 2,  3, 2, 1,  0, 2, 4,
-    0, 4, 1,  3, 1, 5,  3, 5, 2,
-    // Bottom Yellow Part
-    2, 5, 4,  1, 4, 5,
-];
+const bodyIndices = [0, 1, 2,  3, 2, 1,  0, 2, 4, 0, 4, 1,  3, 1, 5,  3, 5, 2, 2, 5, 4,  1, 4, 5];
 birdBodyGeo.setIndex(bodyIndices);
 birdBodyGeo.addGroup(0, 18, 0); // Blue material for top
 birdBodyGeo.addGroup(18, 6, 1); // Yellow material for bottom
 birdBodyGeo.computeVertexNormals();
 
 const birdWingGeo = new THREE.BufferGeometry();
-const wingVertices = new Float32Array([
-    // Vertices for a single wing, extending in +X direction
-    0, 0, 0,          // 0: root
-    1.2, 0, -0.2,     // 1: tip front
-    0.8, 0.05, 0.5,   // 2: feather 1
-    0.5, 0.0, 0.8,    // 3: feather 2 (back)
-    0.2, -0.05, 0.4,  // 4: root back
-]);
+const wingVertices = new Float32Array([0, 0, 0, 1.2, 0, -0.2, 0.8, 0.05, 0.5, 0.5, 0.0, 0.8, 0.2, -0.05, 0.4]);
 birdWingGeo.setAttribute('position', new THREE.BufferAttribute(wingVertices, 3));
 const wingIndices = [0, 1, 2, 0, 2, 4, 2, 3, 4];
 const reversedWingIndices = [0, 2, 1, 0, 4, 2, 2, 4, 3];
@@ -231,37 +208,295 @@ const birdYellowMat = new THREE.MeshLambertMaterial({ color: 0xFFEB3B, side: THR
 const birdDarkMat = new THREE.MeshLambertMaterial({ color: 0x424242, side: THREE.DoubleSide, transparent: true, opacity: 0, fog: false });
 const allBirdMaterials = [birdBlueMat, birdYellowMat, birdDarkMat];
 
+// --- Villager & Village Component Geometries & Materials ---
+const villagerSkinMat = new THREE.MeshLambertMaterial({ color: 0xD2A679 });
+const villagerEyeMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
+const villagerMouthMat = new THREE.MeshLambertMaterial({ color: 0x9c5959 });
+
+const villagerHairMaterials = {
+    brown: new THREE.MeshLambertMaterial({ color: 0x5C4033 }),
+    black: new THREE.MeshLambertMaterial({ color: 0x1E1E1E }),
+    blonde: new THREE.MeshLambertMaterial({ color: 0xD2B48C }),
+    grey: new THREE.MeshLambertMaterial({ color: 0x808080 }),
+};
+const hairColors = Object.keys(villagerHairMaterials);
+const flatTopHairGeo = new THREE.BoxGeometry(1.9, 0.5, 1.9);
+const sidePartHairGeo = new THREE.BoxGeometry(1.9, 0.5, 1.9);
+const bowlCutHairGeo = new THREE.BoxGeometry(2.0, 0.8, 2.0);
+const apronGeo = new THREE.BoxGeometry(1.5, 1.8, 0.2);
+const beltGeo = new THREE.BoxGeometry(2.1, 0.4, 1.6);
+const hatBrimGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.2, 12);
+const hatTopGeo = new THREE.CylinderGeometry(1.0, 1.0, 0.8, 12);
+
+const villagerHeadGeo = new THREE.BoxGeometry(1.8, 1.8, 1.8);
+const villagerNoseGeo = new THREE.BoxGeometry(0.4, 0.8, 0.6);
+const villagerBodyGeo = new THREE.BoxGeometry(2, 2.5, 1.5);
+const villagerArmGeo = new THREE.BoxGeometry(0.8, 2.5, 0.8);
+const villagerLegGeo = new THREE.BoxGeometry(0.8, 1.5, 1);
+const villagerProfessionMaterials = {
+    farmer: new THREE.MeshLambertMaterial({ color: 0xDAA520 }), // Brown/Yellow
+    librarian: new THREE.MeshLambertMaterial({ color: 0xFFFFFF }), // White
+    blacksmith: new THREE.MeshLambertMaterial({ color: 0x36454F }), // Dark Grey
+    nitwit: new THREE.MeshLambertMaterial({ color: 0x50C878 }), // Green
+};
+
+const woodPlankMat = new THREE.MeshLambertMaterial({ color: 0x8B5A2B });
+const woodLogMat = new THREE.MeshLambertMaterial({ color: 0x654321 });
+const cobblestoneMat = new THREE.MeshLambertMaterial({ color: 0x808080 });
+const farmlandMat = new THREE.MeshLambertMaterial({ color: 0x6B4226 });
+const waterMat = new THREE.MeshLambertMaterial({ color: 0x4682B4, transparent: true, opacity: 0.8 });
+const cropMat = new THREE.MeshLambertMaterial({ color: 0x00FF00 });
+
 const createBirdInstance = (): THREE.Group => {
     const bird = new THREE.Group();
-    
     const body = new THREE.Mesh(birdBodyGeo, [birdBlueMat, birdYellowMat]);
     bird.add(body);
-
     const beak = new THREE.Mesh(beakGeo, birdDarkMat);
     beak.position.set(0, 0.1, -0.5);
     beak.rotation.x = Math.PI / 2;
     bird.add(beak);
-
     const leftWing = new THREE.Group();
     leftWing.position.set(-0.2, 0.1, 0);
     const leftWingMesh = new THREE.Mesh(birdWingGeo, [birdBlueMat, birdYellowMat]);
     leftWing.add(leftWingMesh);
     bird.add(leftWing);
-
     const rightWing = new THREE.Group();
     rightWing.position.set(0.2, 0.1, 0);
     const rightWingMesh = new THREE.Mesh(birdWingGeo, [birdBlueMat, birdYellowMat]);
     rightWingMesh.scale.x = -1;
     rightWing.add(rightWingMesh);
     bird.add(rightWing);
-
     bird.userData.leftWing = leftWing;
     bird.userData.rightWing = rightWing;
-
     bird.scale.set(1.5, 1.5, 1.5);
     return bird;
 };
 
+const createVillager = (profession: VillagerProfession, seed: number): THREE.Group => {
+    const villager = new THREE.Group();
+    
+    const baseRobeMat = villagerProfessionMaterials[profession].clone();
+    const hsl = { h: 0, s: 0, l: 0 };
+    baseRobeMat.color.getHSL(hsl);
+    hsl.l += (pseudoRandom(seed * 3) - 0.5) * 0.1; // +/- 5% lightness
+    baseRobeMat.color.setHSL(hsl.h, hsl.s, Math.max(0.1, Math.min(0.9, hsl.l)));
+    
+    const body = new THREE.Mesh(villagerBodyGeo, baseRobeMat);
+    body.position.y = 1.5 + 1.25;
+    body.castShadow = true;
+    villager.add(body);
+    
+    const headGroup = new THREE.Group();
+    headGroup.position.y = 4.9;
+    
+    const head = new THREE.Mesh(villagerHeadGeo, villagerSkinMat);
+    head.castShadow = true;
+    headGroup.add(head);
+    
+    const nose = new THREE.Mesh(villagerNoseGeo, villagerSkinMat);
+    nose.position.set(0, -0.2, 1);
+    head.add(nose);
+    
+    const eyeGeo = new THREE.BoxGeometry(0.25, 0.25, 0.1);
+    const leftEye = new THREE.Mesh(eyeGeo, villagerEyeMat);
+    leftEye.position.set(-0.5, 0.3, 0.95);
+    head.add(leftEye);
+    const rightEye = leftEye.clone();
+    rightEye.position.x = 0.5;
+    head.add(rightEye);
+    
+    const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.15, 0.1), villagerMouthMat);
+    mouth.position.set(0, -0.6, 0.95);
+    head.add(mouth);
+
+    const hairStyleRand = pseudoRandom(seed * 5);
+    const hairColorKey = hairColors[Math.floor(pseudoRandom(seed * 7) * hairColors.length)] as keyof typeof villagerHairMaterials;
+    const hairMat = villagerHairMaterials[hairColorKey];
+    let hair: THREE.Mesh | null = null;
+    if (hairStyleRand < 0.4) {
+        hair = new THREE.Mesh(flatTopHairGeo, hairMat);
+        hair.position.y = 1.15;
+    } else if (hairStyleRand < 0.7) {
+        hair = new THREE.Mesh(sidePartHairGeo, hairMat);
+        hair.position.set(0.1, 1.15, 0);
+    } else if (hairStyleRand < 0.9) {
+        hair = new THREE.Mesh(bowlCutHairGeo, hairMat);
+        hair.position.y = 0.7;
+    }
+    if (hair) head.add(hair);
+
+    villager.add(headGroup);
+
+    if (profession === 'blacksmith') {
+        const apron = new THREE.Mesh(apronGeo, new THREE.MeshLambertMaterial({ color: 0x4B3A26 }));
+        apron.position.set(0, 3.5, 0.8);
+        villager.add(apron);
+    } else if (profession === 'librarian') {
+        const belt = new THREE.Mesh(beltGeo, new THREE.MeshLambertMaterial({ color: 0x654321 }));
+        belt.position.y = 3.2;
+        villager.add(belt);
+    } else if (profession === 'farmer') {
+        if (pseudoRandom(seed*11) > 0.4) {
+            const hat = new THREE.Group();
+            const brim = new THREE.Mesh(hatBrimGeo, new THREE.MeshLambertMaterial({ color: 0xE6BF83 }));
+            const top = new THREE.Mesh(hatTopGeo, new THREE.MeshLambertMaterial({ color: 0xD2A679 }));
+            top.position.y = 0.5;
+            hat.add(brim);
+            hat.add(top);
+            hat.position.y = 1.0;
+            head.add(hat);
+        }
+    }
+
+    const armGroup = new THREE.Group();
+    armGroup.position.y = 4.0;
+    
+    const leftArm = new THREE.Mesh(villagerArmGeo, baseRobeMat);
+    leftArm.castShadow = true;
+    leftArm.position.x = -1.4;
+    leftArm.position.y = -1.25;
+    armGroup.add(leftArm);
+
+    const rightArm = new THREE.Mesh(villagerArmGeo, baseRobeMat);
+    rightArm.castShadow = true;
+    rightArm.position.x = 1.4;
+    rightArm.position.y = -1.25;
+    armGroup.add(rightArm);
+    villager.add(armGroup);
+
+    const leftLeg = new THREE.Mesh(villagerLegGeo, baseRobeMat);
+    leftLeg.castShadow = true;
+    leftLeg.position.set(-0.5, 0.75, 0);
+    villager.add(leftLeg);
+
+    const rightLeg = new THREE.Mesh(villagerLegGeo, baseRobeMat);
+    rightLeg.castShadow = true;
+    rightLeg.position.set(0.5, 0.75, 0);
+    villager.add(rightLeg);
+    
+    villager.userData.leftArm = leftArm;
+    villager.userData.rightArm = rightArm;
+    villager.userData.leftLeg = leftLeg;
+    villager.userData.rightLeg = rightLeg;
+    villager.userData.headGroup = headGroup;
+
+    return villager;
+};
+
+const createHouse = (seed: number): THREE.Group => {
+    const house = new THREE.Group();
+    const width = 5 + pseudoRandom(seed++) * 2;
+    const depth = 6 + pseudoRandom(seed++) * 3;
+    const height = 4;
+
+    // Floor
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(width, 0.2, depth), woodPlankMat);
+    floor.position.y = 0.1;
+    floor.receiveShadow = true;
+    house.add(floor);
+    
+    // Walls
+    const wallGeo = new THREE.BoxGeometry(1, height, 1);
+    for (let x = -width/2; x <= width/2; x++) {
+        for (let z = -depth/2; z <= depth/2; z++) {
+            if (x === -width/2 || x === width/2 || z === -depth/2 || z === depth/2) {
+                // Skip door
+                if (z === depth/2 && x > -1.5 && x < 1.5) continue;
+                
+                const wall = new THREE.Mesh(wallGeo, woodPlankMat);
+                wall.position.set(x, height/2, z);
+                wall.castShadow = true;
+                house.add(wall);
+            }
+        }
+    }
+    
+    // Roof
+    const roofPitch = 0.6;
+    for (let z = -depth/2 - 0.5; z <= depth/2 + 0.5; z++) {
+        for (let x = -width/2 - 0.5; x <= width/2 + 0.5; x++) {
+            const roofBlock = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 1), cobblestoneMat);
+            const yPos = height + (width/2 - Math.abs(x)) * roofPitch;
+            roofBlock.position.set(x, yPos, z);
+            roofBlock.castShadow = true;
+            house.add(roofBlock);
+        }
+    }
+    
+    house.userData.interiorPoint = new THREE.Vector3(0, 1, -1);
+    return house;
+}
+
+const createFarmPlot = (seed: number): THREE.Group => {
+    const farm = new THREE.Group();
+    const width = 4 + Math.floor(pseudoRandom(seed++) * 3);
+    const depth = 6 + Math.floor(pseudoRandom(seed++) * 4);
+    
+    const fencePostGeo = new THREE.BoxGeometry(0.3, 1.5, 0.3);
+    const fenceRailGeo = new THREE.BoxGeometry(1, 0.2, 0.2);
+
+    for (let x = -width/2; x <= width/2; x++) {
+        for (let z = -depth/2; z <= depth/2; z++) {
+            if (x === -width/2 || x === width/2 || z === -depth/2 || z === depth/2) {
+                const post = new THREE.Mesh(fencePostGeo, woodLogMat);
+                post.position.set(x, 0.75, z);
+                post.castShadow = true;
+                farm.add(post);
+            }
+        }
+    }
+
+    const farmPlots: THREE.Vector3[] = [];
+    for (let x = -width/2 + 1; x < width/2 - 1; x++) {
+        for (let z = -depth/2 + 1; z < depth/2 - 1; z++) {
+            const blockType = pseudoRandom(seed + x*17 + z*31);
+            let block;
+            if (blockType < 0.2) { // Water
+                block = new THREE.Mesh(new THREE.BoxGeometry(1, 0.2, 1), waterMat);
+                block.position.y = -0.1;
+            } else { // Farmland
+                block = new THREE.Mesh(new THREE.BoxGeometry(1, 0.2, 1), farmlandMat);
+                block.position.y = -0.1;
+                const crop = new THREE.Mesh(new THREE.BoxGeometry(0.5, pseudoRandom(seed+z*5+x*3)*0.8+0.2, 0.5), cropMat);
+                crop.position.y = 0.4;
+                block.add(crop);
+                farmPlots.push(new THREE.Vector3(x, 0.5, z));
+            }
+            block.position.x = x;
+            block.position.z = z;
+            farm.add(block);
+        }
+    }
+    farm.userData.workPoints = farmPlots;
+    return farm;
+}
+
+const createWell = (seed: number): THREE.Group => {
+    const well = new THREE.Group();
+    const baseGeo = new THREE.BoxGeometry(3, 1, 3);
+    const base = new THREE.Mesh(baseGeo, cobblestoneMat);
+    base.position.y = 0.5;
+    well.add(base);
+
+    const water = new THREE.Mesh(new THREE.BoxGeometry(2, 0.8, 2), waterMat);
+    water.position.y = 0.6;
+    well.add(water);
+
+    const postGeo = new THREE.BoxGeometry(0.4, 3, 0.4);
+    const leftPost = new THREE.Mesh(postGeo, woodLogMat);
+    leftPost.position.set(-1.2, 2.5, 0);
+    well.add(leftPost);
+    const rightPost = leftPost.clone();
+    rightPost.position.x = 1.2;
+    well.add(rightPost);
+
+    const roofGeo = new THREE.BoxGeometry(3.5, 0.4, 3.5);
+    const roof = new THREE.Mesh(roofGeo, woodPlankMat);
+    roof.position.y = 4.2;
+    well.add(roof);
+
+    return well;
+}
 
 // --- Dynamic Sky Element Creators ---
 const createStars = (): THREE.Points => {
@@ -369,7 +604,6 @@ interface CharacterHandles {
 const createCharacter = (appearance: CharacterAppearance): CharacterHandles => {
   const character = new THREE.Group();
   
-  // Create all materials based on appearance colors
   const skinMat = new THREE.MeshLambertMaterial({ color: appearance.skinColor });
   const hairMat = new THREE.MeshLambertMaterial({ color: appearance.hairColor });
   const shirtMat = new THREE.MeshLambertMaterial({ color: appearance.shirtColor });
@@ -381,7 +615,6 @@ const createCharacter = (appearance: CharacterAppearance): CharacterHandles => {
   darkPantsColor.setHSL(hsl.h, hsl.s, hsl.l * 0.7);
   const pantsDarkMat = new THREE.MeshLambertMaterial({ color: darkPantsColor });
 
-  // Static materials
   const eyeWhiteMat = new THREE.MeshLambertMaterial({ color: 0xFFFFFF });
   const eyeBlueMat = new THREE.MeshLambertMaterial({ color: 0x4169E1 });
   const noseMat = new THREE.MeshLambertMaterial({ color: 0xC19A6B });
@@ -389,22 +622,20 @@ const createCharacter = (appearance: CharacterAppearance): CharacterHandles => {
 
   const neckGroup = new THREE.Group();
   neckGroup.name = 'neckGroup';
-  neckGroup.position.y = 5.5; // Top of the body, our pivot point
+  neckGroup.position.y = 5.5;
 
   const headGroup = new THREE.Group();
   headGroup.name = 'headGroup';
-  headGroup.position.y = 1; // Position the head above the pivot point
+  headGroup.position.y = 1;
 
   const headGeo = new THREE.BoxGeometry(2, 2, 2);
   const head = new THREE.Mesh(headGeo, skinMat);
   head.castShadow = true;
   headGroup.add(head);
 
-  // --- Hair Styles ---
   const hairContainer = new THREE.Group();
   headGroup.add(hairContainer);
 
-  // Standard Hair
   const standardHair = new THREE.Group();
   const hairGeo = new THREE.BoxGeometry(2.1, 0.4, 2.1);
   const hairTop = new THREE.Mesh(hairGeo, hairMat);
@@ -418,7 +649,6 @@ const createCharacter = (appearance: CharacterAppearance): CharacterHandles => {
   mustache.position.set(0, -0.6, 1.1);
   standardHair.add(mustache);
 
-  // Long Hair
   const longHair = new THREE.Group();
   const longHairTop = hairTop.clone();
   longHair.add(longHairTop);
@@ -426,7 +656,6 @@ const createCharacter = (appearance: CharacterAppearance): CharacterHandles => {
   longHairBack.position.set(0, -0.25, -1.05);
   longHair.add(longHairBack);
   
-  // Bald (empty group)
   const baldHair = new THREE.Group();
 
   const hairStyles = { standard: standardHair, long: longHair, bald: baldHair };
@@ -434,7 +663,6 @@ const createCharacter = (appearance: CharacterAppearance): CharacterHandles => {
       hairContainer.add(hairStyles[appearance.hairStyle]);
   }
 
-  // --- Face details ---
   const leftEyeWhite = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.1), eyeWhiteMat);
   leftEyeWhite.position.set(-0.5, 0.1, 1.05);
   headGroup.add(leftEyeWhite);
@@ -687,13 +915,13 @@ const createBush = (x: number, z: number, seed: number): THREE.Group => {
 const findNewLandingSpot = (tree: THREE.Group): THREE.Vector3 => {
     const instancedLeaves = tree.children.find(c => c instanceof THREE.InstancedMesh) as THREE.InstancedMesh;
     if (!instancedLeaves || instancedLeaves.count === 0) {
-      return new THREE.Vector3(0, tree.userData.height, 0); // Fallback
+      return new THREE.Vector3(0, tree.userData.height, 0);
     }
     const leafIndex = Math.floor(Math.random() * instancedLeaves.count);
     const matrix = new THREE.Matrix4();
     instancedLeaves.getMatrixAt(leafIndex, matrix);
     const leafPosition = new THREE.Vector3().setFromMatrixPosition(matrix);
-    leafPosition.y -= 0.8; // Sit deep inside the leaf block for a more natural perch
+    leafPosition.y -= 0.8;
     return leafPosition;
 };
 
@@ -704,16 +932,23 @@ interface MinecraftSceneProps {
   cameraMode: CameraMode;
   characterAppearance: CharacterAppearance;
   onCameraToggle: () => void;
+  interacted: boolean;
 }
 
-const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJumpEnd, cameraMode, characterAppearance, onCameraToggle }) => {
+const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJumpEnd, cameraMode, characterAppearance, onCameraToggle, interacted }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const birdsRef = useRef<THREE.Group[]>([]);
+  const villagersRef = useRef<THREE.Group[]>([]);
   const characterHandlesRef = useRef<CharacterHandles | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const debugCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const [isPointerLocked, setIsPointerLocked] = useState(false);
   
+  const audioListenerRef = useRef<THREE.AudioListener | null>(null);
+  const windGainRef = useRef<GainNode | null>(null);
+  const birdChirpBufferRef = useRef<AudioBuffer | null>(null);
+  const villageSoundsBufferRef = useRef<AudioBuffer | null>(null);
+
   const moveRef = useRef(move);
   const isJumpingRef = useRef(isJumping);
   const onJumpEndRef = useRef(onJumpEnd);
@@ -730,11 +965,21 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
   }, [move, isJumping, onJumpEnd, cameraMode, onCameraToggle]);
 
   useEffect(() => {
+    if (interacted) {
+        if (audioListenerRef.current && audioListenerRef.current.context.state === 'suspended') {
+            audioListenerRef.current.context.resume().catch(e => console.error("Audio context could not be resumed:", e));
+        }
+        if (windGainRef.current && audioListenerRef.current) {
+            windGainRef.current.gain.setTargetAtTime(0.05, audioListenerRef.current.context.currentTime, 0.5);
+        }
+    }
+  }, [interacted]);
+
+  useEffect(() => {
     if (!characterHandlesRef.current) return;
 
     const { materials, hairContainer, hairStyles } = characterHandlesRef.current;
     
-    // Update colors
     materials.skin.color.set(characterAppearance.skinColor);
     materials.hair.color.set(characterAppearance.hairColor);
     materials.shirt.color.set(characterAppearance.shirtColor);
@@ -746,7 +991,6 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     darkPantsColor.setHSL(hsl.h, hsl.s, hsl.l * 0.7);
     materials.pantsDark.color.copy(darkPantsColor);
     
-    // Update hair style
     while(hairContainer.children.length > 0){ 
       hairContainer.remove(hairContainer.children[0]); 
     }
@@ -764,6 +1008,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     const playerVelocity = new THREE.Vector3();
     let isOnGround = true;
     const activeChunks = new Map<string, THREE.Group>();
+    const activeVillages = new Map<string, THREE.Group>();
     let lastPlayerChunk: { x: number, z: number } | null = null;
     
     const scene = new THREE.Scene();
@@ -789,9 +1034,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
 
     const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(container.clientWidth, container.clientHeight),
-        0.5, // strength
-        0.4, // radius
-        0.85 // threshold
+        0.5, 0.4, 0.85
     );
     composer.addPass(bloomPass);
 
@@ -832,6 +1075,71 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     character.position.set(0, startY, 5);
     scene.add(character);
     
+    const listener = new THREE.AudioListener();
+    audioListenerRef.current = listener;
+    handles.neckGroup.add(listener);
+
+    // --- Procedural Audio Generation ---
+    const audioContext = listener.context;
+    // Wind sound
+    const windNode = audioContext.createBufferSource();
+    const bufferSize = audioContext.sampleRate * 2;
+    const windBuffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
+    const windData = windBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) { windData[i] = Math.random() * 2 - 1; }
+    windNode.buffer = windBuffer;
+    windNode.loop = true;
+    const windFilter = audioContext.createBiquadFilter();
+    windFilter.type = 'lowpass'; windFilter.frequency.value = 400; windFilter.Q.value = 5;
+    const windGain = audioContext.createGain();
+    windGain.gain.value = 0;
+    windGainRef.current = windGain;
+    windNode.connect(windFilter);
+    windFilter.connect(windGain);
+    windGain.connect(listener.getInput());
+    windNode.start(0);
+
+    // Bird chirp buffer
+    const createChirpBuffer = (ctx: AudioContext): AudioBuffer => {
+        const duration = 0.2;
+        const sr = ctx.sampleRate;
+        const bufSize = sr * duration;
+        const buffer = ctx.createBuffer(1, bufSize, sr);
+        const data = buffer.getChannelData(0);
+        let freq = 2000;
+        for (let i = 0; i < bufSize; i++) {
+            const t = i / sr;
+            data[i] = Math.sin(2 * Math.PI * freq * t) * (1 - i / bufSize) * 0.5;
+            freq += Math.sin(2 * Math.PI * 40 * t) * 500;
+        }
+        return buffer;
+    };
+    birdChirpBufferRef.current = createChirpBuffer(audioContext);
+    
+    // Village sounds buffer
+    const createVillageSoundsBuffer = (ctx: AudioContext): AudioBuffer => {
+        const duration = 10;
+        const sr = ctx.sampleRate;
+        const bufSize = sr * duration;
+        const buffer = ctx.createBuffer(1, bufSize, sr);
+        const data = buffer.getChannelData(0);
+        const addSound = (offset: number, gen: (t: number) => number, soundDur: number) => {
+            const start = Math.floor(offset * sr);
+            const end = Math.floor((offset + soundDur) * sr);
+            for (let i = start; i < end && i < bufSize; i++) {
+                data[i] += gen((i - start) / sr) * 0.2;
+            }
+        };
+        const hammer = (t: number) => Math.sin(2 * Math.PI * 800 * t) * Math.exp(-t * 25);
+        const woodChop = (t: number) => (Math.random() * 2 - 1) * Math.exp(-t * 30);
+        for (let i = 0; i < 7; i++) {
+            addSound(Math.random() * duration, hammer, 0.15);
+            addSound(Math.random() * duration, woodChop, 0.2);
+        }
+        return buffer;
+    };
+    villageSoundsBufferRef.current = createVillageSoundsBuffer(audioContext);
+
     firstPersonCamera.position.set(0, 0.1, 0.5);
     firstPersonCamera.rotation.y = Math.PI;
     handles.headGroup.add(firstPersonCamera);
@@ -842,7 +1150,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     scene.add(dog);
 
     const stars = createStars();
-    stars.position.y = -100; // Offset to avoid clipping with near plane
+    stars.position.y = -100;
     scene.add(stars);
     const moon = createMoon();
     scene.add(moon);
@@ -911,7 +1219,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
               chunkGroup.add(tree);
 
               if (pseudoRandom(seed * 5) < BIRD_TREE_CHANCE) {
-                  const numBirds = Math.floor(pseudoRandom(seed * 7) * 3) + 1; // 1-3 birds
+                  const numBirds = Math.floor(pseudoRandom(seed * 7) * 3) + 1;
                   const instancedLeaves = tree.children.find(c => c instanceof THREE.InstancedMesh) as THREE.InstancedMesh;
                   if (instancedLeaves) {
                       for (let i = 0; i < numBirds; i++) {
@@ -920,22 +1228,25 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
 
                           bird.userData = {
                               ...bird.userData,
-                              state: 'SITTING', // SITTING, FLYING
-                              flightMode: 'NONE', // CIRCLING, EXPLORING, SWOOPING, RETURNING
-                              homeTree: tree,
+                              state: 'SITTING', flightMode: 'NONE', homeTree: tree,
                               nest: treeHasNest ? tree.userData.nest : null,
                               chunkId: chunkId,
-                              stateTimer: pseudoRandom(seed * 13 * (i+1)) * 10 + 5, // 5-15 seconds
+                              stateTimer: pseudoRandom(seed * 13 * (i+1)) * 10 + 5,
                               landingSpot: treeHasNest ? tree.userData.nest.position.clone() : findNewLandingSpot(tree),
                               flapOffset: Math.random() * Math.PI * 2,
                               velocity: new THREE.Vector3((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2).normalize().multiplyScalar(BIRD_MAX_SPEED),
                           };
                           
+                          const birdAudio = new THREE.PositionalAudio(listener);
+                          birdAudio.setRefDistance(5);
+                          birdAudio.setRolloffFactor(2);
+                          birdAudio.setVolume(0.8);
+                          bird.add(birdAudio);
+                          bird.userData.audio = birdAudio;
+                          
                           const treeWorldPos = chunkGroup.position.clone().add(tree.position);
                           bird.position.copy(treeWorldPos).add(bird.userData.landingSpot);
-                          if (treeHasNest) {
-                              bird.position.y += 0.2; // Sit inside nest
-                          }
+                          if (treeHasNest) bird.position.y += 0.2;
 
                           const lookAwayTarget = bird.position.clone().add(new THREE.Vector3(Math.random()-0.5, 0, Math.random()-0.5).normalize());
                           bird.lookAt(lookAwayTarget);
@@ -954,6 +1265,89 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                 chunkGroup.add(bush);
             }
 
+            if (pseudoRandom(seed * 13) < VILLAGE_DENSITY && !activeVillages.has(chunkId)) {
+                const villageGroup = new THREE.Group();
+                villageGroup.position.set(x * CHUNK_SIZE, 0, z * CHUNK_SIZE);
+                villageGroup.userData.chunkId = chunkId;
+
+                const villageSeed = seed * 17;
+                const numHouses = 2 + Math.floor(pseudoRandom(villageSeed) * 2);
+                const houses = [];
+                for(let i = 0; i < numHouses; i++) {
+                    const house = createHouse(villageSeed + i * 3);
+                    const angle = (i / numHouses) * Math.PI * 2 + pseudoRandom(villageSeed+i) * 0.5;
+                    const radius = 8 + pseudoRandom(villageSeed+i*2)*4;
+                    const houseX = Math.cos(angle) * radius;
+                    const houseZ = Math.sin(angle) * radius;
+                    house.position.set(houseX, getHeight(villageGroup.position.x + houseX, villageGroup.position.z + houseZ), houseZ);
+                    house.rotation.y = -angle + Math.PI/2;
+                    villageGroup.add(house);
+                    houses.push(house);
+                }
+
+                const farm = createFarmPlot(villageSeed + 11);
+                farm.position.set(0, getHeight(villageGroup.position.x, villageGroup.position.z), 12);
+                villageGroup.add(farm);
+                
+                const well = createWell(villageSeed + 13);
+                well.position.set(0, getHeight(villageGroup.position.x, villageGroup.position.z), -2);
+                villageGroup.add(well);
+                
+                if (villageSoundsBufferRef.current) {
+                    const villageAudio = new THREE.PositionalAudio(listener);
+                    villageAudio.setBuffer(villageSoundsBufferRef.current);
+                    villageAudio.setRefDistance(30);
+                    villageAudio.setRolloffFactor(1.5);
+                    villageAudio.setLoop(true);
+                    villageAudio.setVolume(0.6);
+                    villageAudio.position.copy(well.position);
+                    villageGroup.add(villageAudio);
+                    if (interacted) villageAudio.play();
+                    villageGroup.userData.audio = villageAudio;
+                }
+
+                const numVillagers = numHouses + Math.floor(pseudoRandom(villageSeed + 17));
+                const professions: VillagerProfession[] = ['farmer', 'librarian', 'blacksmith', 'nitwit'];
+                for(let i=0; i<numVillagers; i++) {
+                    const prof = professions[Math.floor(pseudoRandom(villageSeed+i*19) * professions.length)];
+                    const villager = createVillager(prof, villageSeed + i * 19);
+                    
+                    const spawnAngle = Math.random() * Math.PI * 2;
+                    const villagerX = villageGroup.position.x + Math.cos(spawnAngle) * 5;
+                    const villagerZ = villageGroup.position.z + Math.sin(spawnAngle) * 5;
+                    villager.position.set(villagerX, getHeight(villagerX, villagerZ), villagerZ);
+
+                    const homeHouse = houses[i % houses.length];
+                    const homePointInHouse = homeHouse.userData.interiorPoint.clone().applyQuaternion(homeHouse.quaternion);
+                    const homePoint = homeHouse.position.clone().add(homePointInHouse).add(villageGroup.position);
+                    homePoint.y = getHeight(homePoint.x, homePoint.z) + 1;
+
+                    villager.userData = {
+                        ...villager.userData,
+                        state: 'IDLE', stateTimer: pseudoRandom(villageSeed * 23 * i) * 5 + 3,
+                        chunkId: chunkId, targetPosition: null, profession: prof,
+                        homePoint: homePoint,
+                        workPoint: (() => {
+                            if (prof === 'farmer' && farm.userData.workPoints.length > 0) {
+                                const workPointInFarm = farm.userData.workPoints[i % farm.userData.workPoints.length];
+                                const point = farm.position.clone().add(workPointInFarm).add(villageGroup.position);
+                                point.y = getHeight(point.x, point.z) + 0.5;
+                                return point;
+                            }
+                            return null;
+                        })(),
+                        velocity: new THREE.Vector3(),
+                        isOnGround: true,
+                    };
+                    villager.rotation.y = pseudoRandom(seed * 29) * Math.PI * 2;
+                    scene.add(villager);
+                    villagersRef.current.push(villager);
+                }
+
+                scene.add(villageGroup);
+                activeVillages.set(chunkId, villageGroup);
+            }
+
             scene.add(chunkGroup);
             activeChunks.set(chunkId, chunkGroup);
           }
@@ -964,8 +1358,25 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         const x = parseInt(xStr, 10);
         const z = parseInt(zStr, 10);
         if (Math.abs(x - currentChunkX) > RENDER_DISTANCE_IN_CHUNKS || Math.abs(z - currentChunkZ) > RENDER_DISTANCE_IN_CHUNKS) {
+          if (activeVillages.has(chunkId)) {
+              const village = activeVillages.get(chunkId)!;
+              if (village.userData.audio && village.userData.audio.isPlaying) {
+                  village.userData.audio.stop();
+              }
+              scene.remove(village);
+              activeVillages.delete(chunkId);
+              villagersRef.current = villagersRef.current.filter(v => {
+                  if (v.userData.chunkId === chunkId) {
+                      scene.remove(v); return false;
+                  }
+                  return true;
+              });
+          }
           birdsRef.current = birdsRef.current.filter(bird => {
             if (bird.userData.chunkId === chunkId) {
+                if (bird.userData.audio && bird.userData.audio.isPlaying) {
+                    bird.userData.audio.stop();
+                }
                 scene.remove(bird);
                 return false;
             }
@@ -982,7 +1393,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     const clock = new THREE.Clock();
     let lastBirdOpacity = -1.0;
     const treeWorldPosHelper = new THREE.Vector3();
-    const targetLookAt = new THREE.Vector3(); // For camera
+    const targetLookAt = new THREE.Vector3();
 
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
@@ -1094,20 +1505,22 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                   data.state = 'FLYING';
                   const rand = Math.random();
                   if (rand < 0.5) {
-                      data.flightMode = 'CIRCLING';
-                      data.stateTimer = Math.random() * 8 + 8;
-                      data.circleAngle = Math.random() * Math.PI * 2;
-                      data.circleRadius = Math.random() * 10 + 10;
+                      data.flightMode = 'CIRCLING'; data.stateTimer = Math.random() * 8 + 8;
+                      data.circleAngle = Math.random() * Math.PI * 2; data.circleRadius = Math.random() * 10 + 10;
                       data.circleAltitude = Math.random() * 5 + 5;
                   } else if (rand < 0.85) {
-                      data.flightMode = 'EXPLORING';
-                      data.stateTimer = Math.random() * 10 + 15;
+                      data.flightMode = 'EXPLORING'; data.stateTimer = Math.random() * 10 + 15;
                   } else {
                       data.flightMode = 'SWOOPING';
                       data.homeTree.getWorldPosition(treeWorldPosHelper);
                       data.swoopTarget = new THREE.Vector3(treeWorldPosHelper.x + (Math.random() - 0.5) * 20, treeWorldPosHelper.y - 1, treeWorldPosHelper.z + (Math.random() - 0.5) * 20);
                       data.swoopPhase = 'DIVE';
                   }
+              } else {
+                 if (data.audio && !data.audio.isPlaying && Math.random() < 0.005) {
+                    if (!data.audio.buffer) data.audio.setBuffer(birdChirpBufferRef.current);
+                    data.audio.play();
+                 }
               }
               break;
 
@@ -1151,9 +1564,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                   bird.lookAt(lookTarget);
                   if (data.stateTimer <= 0) {
                       data.flightMode = 'RETURNING';
-                      if (!data.nest) {
-                        data.landingSpot = findNewLandingSpot(data.homeTree);
-                      }
+                      if (!data.nest) data.landingSpot = findNewLandingSpot(data.homeTree);
                   }
               } else if (data.flightMode === 'SWOOPING') {
                   if (data.swoopPhase === 'DIVE') {
@@ -1167,25 +1578,19 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                       bird.position.lerp(data.swoopTarget, delta * 2.5);
                       bird.lookAt(data.swoopTarget);
                       if (bird.position.distanceTo(data.swoopTarget) < 3) {
-                          data.flightMode = 'CIRCLING';
-                          data.stateTimer = Math.random() * 8 + 8;
-                          data.circleAngle = Math.random() * Math.PI * 2;
-                          data.circleRadius = Math.random() * 10 + 10;
+                          data.flightMode = 'CIRCLING'; data.stateTimer = Math.random() * 8 + 8;
+                          data.circleAngle = Math.random() * Math.PI * 2; data.circleRadius = Math.random() * 10 + 10;
                           data.circleAltitude = Math.random() * 5 + 5;
                       }
                   }
               } else if (data.flightMode === 'EXPLORING') {
-                  const alignment = new THREE.Vector3();
-                  const cohesion = new THREE.Vector3();
-                  const separation = new THREE.Vector3();
+                  const alignment = new THREE.Vector3(), cohesion = new THREE.Vector3(), separation = new THREE.Vector3();
                   let neighborCount = 0;
-
                   for (const otherBird of birdsRef.current) {
                       if (otherBird !== bird && otherBird.userData.state === 'FLYING' && otherBird.userData.flightMode === 'EXPLORING') {
                           const dist = bird.position.distanceTo(otherBird.position);
                           if (dist > 0 && dist < BIRD_PERCEPTION_RADIUS) {
-                              alignment.add(otherBird.userData.velocity);
-                              cohesion.add(otherBird.position);
+                              alignment.add(otherBird.userData.velocity); cohesion.add(otherBird.position);
                               if (dist < BIRD_SEPARATION_DISTANCE) {
                                   const diff = new THREE.Vector3().subVectors(bird.position, otherBird.position);
                                   diff.normalize().divideScalar(dist);
@@ -1202,36 +1607,180 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                       separation.divideScalar(neighborCount).normalize().multiplyScalar(BIRD_MAX_SPEED).sub(data.velocity).multiplyScalar(BIRD_SEPARATION_WEIGHT);
                       data.velocity.add(alignment).add(cohesion).add(separation);
                   } else {
-                      const wanderStrength = 0.3;
-                      const wanderVector = new THREE.Vector3(
-                          (Math.random() - 0.5),
-                          (Math.random() - 0.5) * 0.3,
-                          (Math.random() - 0.5)
-                      );
-                      data.velocity.add(wanderVector.normalize().multiplyScalar(wanderStrength));
+                      const wanderVector = new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5) * 0.3, (Math.random() - 0.5));
+                      data.velocity.add(wanderVector.normalize().multiplyScalar(0.3));
                   }
-
-                  if (data.velocity.lengthSq() < 0.1) {
-                      data.velocity.set(Math.random() - 0.5, 0, Math.random() - 0.5);
-                  }
-
+                  if (data.velocity.lengthSq() < 0.1) data.velocity.set(Math.random() - 0.5, 0, Math.random() - 0.5);
                   data.velocity.clampLength(BIRD_MAX_SPEED * 0.6, BIRD_MAX_SPEED);
-                  
                   bird.position.add(data.velocity.clone().multiplyScalar(delta));
                   const lookTarget = bird.position.clone().add(data.velocity);
                   bird.lookAt(lookTarget);
-
                   if (data.stateTimer <= 0) {
                       data.flightMode = 'RETURNING';
-                      if (!data.nest) {
-                          data.landingSpot = findNewLandingSpot(data.homeTree);
-                      }
+                      if (!data.nest) data.landingSpot = findNewLandingSpot(data.homeTree);
                   }
               }
               break;
           }
         });
       }
+
+      // --- Villager AI ---
+      villagersRef.current.forEach(villager => {
+        const data = villager.userData;
+        data.stateTimer -= delta;
+
+        // Villager physics to keep them grounded
+        if (data.state !== 'SLEEPING') {
+            const groundY = getHeight(villager.position.x, villager.position.z);
+            if (!data.velocity) data.velocity = new THREE.Vector3(); // Safety for hot-reloads
+
+            data.velocity.y -= GRAVITY * delta;
+            villager.position.y += data.velocity.y * delta;
+
+            if (villager.position.y < groundY) {
+                villager.position.y = groundY;
+                data.velocity.y = 0;
+                data.isOnGround = true;
+            } else {
+                data.isOnGround = false;
+            }
+        }
+        
+        const distanceToPlayer = villager.position.distanceTo(character.position);
+        const isDayTime = timeOfDay > 0.28 && timeOfDay < 0.76;
+        const isNightTime = !isDayTime;
+
+        // High-level state changes based on time
+        if (isNightTime && data.state !== 'SLEEPING' && data.state !== 'GOING_HOME') {
+            data.state = 'GOING_HOME';
+            data.targetPosition = data.homePoint;
+        }
+        if (isDayTime && data.state === 'SLEEPING') {
+            data.state = 'IDLE'; data.stateTimer = Math.random() * 5 + 3;
+        }
+
+        // Player interaction overrides other states
+        if (distanceToPlayer < VILLAGER_INTERACTION_RADIUS && data.state !== 'LOOKING_AT_PLAYER') {
+            data.prevState = data.state;
+            data.state = 'LOOKING_AT_PLAYER';
+            data.targetPosition = null;
+        } else if (distanceToPlayer >= VILLAGER_INTERACTION_RADIUS && data.state === 'LOOKING_AT_PLAYER') {
+            data.state = data.prevState || 'IDLE';
+            data.stateTimer = Math.random() * 2 + 1;
+        }
+        
+        // Timer-based state changes for daytime
+        if (data.stateTimer <= 0 && isDayTime) {
+            if (data.state === 'IDLE' || data.state === 'WANDERING') {
+                if (data.profession === 'farmer' && data.workPoint && Math.random() < 0.5) {
+                    data.state = 'GOING_TO_WORK'; data.targetPosition = data.workPoint;
+                } else {
+                    data.state = 'WANDERING';
+                    const angle = Math.random() * Math.PI * 2;
+                    const wanderDist = Math.random() * 10 + 5;
+                    data.targetPosition = new THREE.Vector3(
+                        villager.position.x + Math.cos(angle) * wanderDist, 0,
+                        villager.position.z + Math.sin(angle) * wanderDist
+                    );
+                    data.stateTimer = wanderDist / VILLAGER_SPEED + (Math.random() * 2);
+                }
+            } else { // from WORKING or other states
+                 data.state = 'IDLE'; data.stateTimer = Math.random() * 8 + 5;
+            }
+        }
+    
+        // State actions
+        let isMoving = false;
+        let targetYRotation: number | null = null;
+        const ROTATION_SPEED = 4.0;
+
+        switch (data.state) {
+            case 'IDLE': /* Do nothing */ break;
+            case 'LOOKING_AT_PLAYER':
+                {
+                    const lookAtTarget = new THREE.Vector3(character.position.x, villager.position.y, character.position.z);
+                    const direction = lookAtTarget.sub(villager.position);
+                    if (direction.lengthSq() > 0.01) {
+                        targetYRotation = Math.atan2(direction.x, direction.z);
+                    }
+                }
+                break;
+            case 'GOING_HOME':
+            case 'GOING_TO_WORK':
+            case 'WANDERING':
+                if (data.targetPosition) {
+                    const target = data.targetPosition;
+                    const direction = new THREE.Vector3().subVectors(target, villager.position);
+                    direction.y = 0;
+                    if (direction.lengthSq() > 1) {
+                        isMoving = true;
+                        direction.normalize();
+                        villager.position.x += direction.x * VILLAGER_SPEED * delta;
+                        villager.position.z += direction.z * VILLAGER_SPEED * delta;
+                        targetYRotation = Math.atan2(direction.x, direction.z);
+                    } else { // Arrived
+                        data.targetPosition = null;
+                        if(data.state === 'GOING_HOME') data.state = 'SLEEPING';
+                        if(data.state === 'GOING_TO_WORK') { data.state = 'WORKING'; data.stateTimer = Math.random() * 10 + 10; }
+                        if(data.state === 'WANDERING') { data.state = 'IDLE'; data.stateTimer = Math.random() * 5 + 3; }
+                    }
+                }
+                break;
+            case 'WORKING':
+                const workBob = Math.sin(elapsedTime * 3) * 0.1;
+                data.headGroup.position.y = 4.9 + workBob;
+                data.leftArm.rotation.x = -Math.PI / 4 + workBob * 2;
+                data.rightArm.rotation.x = -Math.PI / 4 - workBob * 2;
+                break;
+            case 'SLEEPING':
+                 villager.position.lerp(data.homePoint, delta); // stay inside
+                 break;
+        }
+        
+        // Unify rotation logic to prevent tilting and ensure smooth turning.
+        if (targetYRotation !== null) {
+            const currentRotation = villager.rotation.y;
+            let diff = targetYRotation - currentRotation;
+            
+            // Find the shortest path to the target rotation
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+
+            // Apply rotation change
+            villager.rotation.y += diff * ROTATION_SPEED * delta;
+        }
+
+        // Explicitly prevent any tilting on X and Z axes.
+        villager.rotation.x = 0;
+        villager.rotation.z = 0;
+        
+        // Animation
+        if (isMoving) {
+            const walkSpeed = elapsedTime * 6;
+            const swingAngle = Math.sin(walkSpeed) * 0.4;
+            data.leftArm.rotation.x = swingAngle;
+            data.rightArm.rotation.x = -swingAngle;
+            if (data.leftLeg && data.rightLeg) {
+                data.leftLeg.rotation.x = -swingAngle;
+                data.rightLeg.rotation.x = swingAngle;
+            }
+        } else if (data.state !== 'WORKING') {
+            data.leftArm.rotation.x = THREE.MathUtils.lerp(data.leftArm.rotation.x, 0, delta * 10);
+            data.rightArm.rotation.x = THREE.MathUtils.lerp(data.rightArm.rotation.x, 0, delta * 10);
+            data.headGroup.position.y = THREE.MathUtils.lerp(data.headGroup.position.y, 4.9, delta * 10);
+            if (data.leftLeg && data.rightLeg) {
+                data.leftLeg.rotation.x = THREE.MathUtils.lerp(data.leftLeg.rotation.x, 0, delta * 10);
+                data.rightLeg.rotation.x = THREE.MathUtils.lerp(data.rightLeg.rotation.x, 0, delta * 10);
+            }
+        } else if (data.state === 'WORKING') {
+             if (data.leftLeg && data.rightLeg) {
+                data.leftLeg.rotation.x = THREE.MathUtils.lerp(data.leftLeg.rotation.x, 0, delta * 10);
+                data.rightLeg.rotation.x = THREE.MathUtils.lerp(data.rightLeg.rotation.x, 0, delta * 10);
+            }
+        }
+      });
+
 
       // --- Player Movement ---
       let walkMagnitude = 0;
@@ -1244,7 +1793,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
           character.position.x += Math.sin(character.rotation.y) * moveSpeed * delta;
           character.position.z += Math.cos(character.rotation.y) * moveSpeed * delta;
         }
-      } else { // Desktop movement
+      } else {
         const forwardInput = (keysPressed.current['w'] || keysPressed.current['arrowup'] ? 1 : 0) - (keysPressed.current['s'] || keysPressed.current['arrowdown'] ? 1 : 0);
         const strafeInput = (keysPressed.current['a'] || keysPressed.current['arrowleft'] ? 1 : 0) - (keysPressed.current['d'] || keysPressed.current['arrowright'] ? 1 : 0);
         
@@ -1366,15 +1915,13 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                 const isShowingThirdPersonInBox = currentCameraMode === 'first-person';
                 const debugCamToRender = isShowingThirdPersonInBox ? debugCameraRef.current : firstPersonCamera;
 
-                // Save original visibility
                 const originalHairVisibility = characterHandlesRef.current!.hairContainer.visible;
                 const originalHeadPartVisibility: { [key: number]: boolean } = {};
                 headGroup.children.forEach((c, i) => originalHeadPartVisibility[i] = c.visible);
 
-                // Set visibility for debug render
                 if (isShowingThirdPersonInBox) {
                     const debugCam = debugCameraRef.current;
-                    const debugOffset = new THREE.Vector3(0, 8, -15); // From the back
+                    const debugOffset = new THREE.Vector3(0, 8, -15);
                     debugOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), character.rotation.y);
                     debugCam.position.copy(character.position).add(debugOffset);
                     const debugLookAtTarget = character.position.clone();
@@ -1383,7 +1930,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                     
                     headGroup.children.forEach(c => c.visible = true);
                     characterHandlesRef.current!.hairContainer.visible = true;
-                } else { // Showing first person in box
+                } else {
                     headGroup.children.forEach(child => {
                         if (!(child instanceof THREE.Camera) && child !== characterHandlesRef.current!.hairContainer) {
                             child.visible = false;
@@ -1392,7 +1939,6 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                     characterHandlesRef.current!.hairContainer.visible = false;
                 }
         
-                // Render debug view
                 renderer.autoClear = false;
                 renderer.clearDepth();
                 renderer.setScissorTest(true);
@@ -1402,7 +1948,6 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                 renderer.setScissorTest(false);
                 renderer.autoClear = true;
                 
-                // Restore original visibility
                 characterHandlesRef.current!.hairContainer.visible = originalHairVisibility;
                 headGroup.children.forEach((c, i) => c.visible = originalHeadPartVisibility[i]);
             }
@@ -1457,6 +2002,18 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     window.addEventListener('resize', handleResize);
 
     return () => {
+      windNode.stop();
+      activeVillages.forEach(village => {
+        if (village.userData.audio && village.userData.audio.isPlaying) {
+          village.userData.audio.stop();
+        }
+      });
+      birdsRef.current.forEach(bird => {
+        if (bird.userData.audio && bird.userData.audio.isPlaying) {
+            bird.userData.audio.stop();
+        }
+      });
+
       cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', handleResize);
       if (container.contains(renderer.domElement)) {
@@ -1474,34 +2031,28 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         window.removeEventListener('keyup', handleKeyUp);
       }
 
-      sun.geometry.dispose();
-      (sun.material as THREE.Material).dispose();
-      moon.geometry.dispose();
-      ((moon.material as THREE.MeshStandardMaterial).map as THREE.Texture)?.dispose();
-      (moon.material as THREE.Material).dispose();
-      stars.geometry.dispose();
-      (stars.material as THREE.Material).dispose();
+      sun.geometry.dispose();(sun.material as THREE.Material).dispose();
+      moon.geometry.dispose();((moon.material as THREE.MeshStandardMaterial).map as THREE.Texture)?.dispose();(moon.material as THREE.Material).dispose();
+      stars.geometry.dispose();(stars.material as THREE.Material).dispose();
       clouds.children.forEach(cloud => {
         (cloud as THREE.Mesh).geometry.dispose();
         ((cloud as THREE.Mesh).material as THREE.Material[]).forEach(m => m.dispose());
       });
 
-      birdBodyGeo.dispose();
-      birdWingGeo.dispose();
-      beakGeo.dispose();
-      allBirdMaterials.forEach(m => m.dispose());
+      birdBodyGeo.dispose(); birdWingGeo.dispose(); beakGeo.dispose(); allBirdMaterials.forEach(m => m.dispose());
+      nestMaterial.dispose(); nestTwigGeo.dispose();
+      groundTopGeo.dispose(); groundBaseGeo.dispose();
+      grassTexture.dispose(); dirtTexture.dispose(); grassMaterial.dispose(); dirtMaterial.dispose();
+      leafGeometry.dispose(); leafMaterial.dispose(); bushLeafGeo.dispose();
       
-      nestMaterial.dispose();
-      nestTwigGeo.dispose();
-      groundTopGeo.dispose();
-      groundBaseGeo.dispose();
-      grassTexture.dispose();
-      dirtTexture.dispose();
-      grassMaterial.dispose();
-      dirtMaterial.dispose();
-      leafGeometry.dispose();
-      leafMaterial.dispose();
-      bushLeafGeo.dispose();
+      villagerSkinMat.dispose(); villagerEyeMat.dispose(); villagerMouthMat.dispose();
+      Object.values(villagerHairMaterials).forEach(m => m.dispose());
+      Object.values(villagerProfessionMaterials).forEach(m => m.dispose());
+      villagerHeadGeo.dispose(); villagerNoseGeo.dispose(); villagerBodyGeo.dispose(); villagerArmGeo.dispose(); villagerLegGeo.dispose();
+      flatTopHairGeo.dispose(); sidePartHairGeo.dispose(); bowlCutHairGeo.dispose(); apronGeo.dispose(); beltGeo.dispose(); hatBrimGeo.dispose(); hatTopGeo.dispose();
+      
+      woodPlankMat.dispose(); woodLogMat.dispose(); cobblestoneMat.dispose(); farmlandMat.dispose(); waterMat.dispose(); cropMat.dispose();
+
       scene.traverse(object => {
         if (object instanceof THREE.Mesh) {
           object.geometry.dispose();
@@ -1516,9 +2067,9 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
   }, []);
 
   const handleContainerClick = () => {
+    // Handle pointer lock for desktop controls.
     if (!isMobile && !isPointerLocked && rendererRef.current) {
-      Promise.resolve(rendererRef.current.domElement.requestPointerLock())
-        .catch(err => console.error(err));
+      rendererRef.current.domElement.requestPointerLock().catch(err => console.error("Pointer lock failed:", err));
     }
   };
 
