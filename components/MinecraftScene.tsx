@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as THREE from 'three';
 import { MoveVector, CameraMode, CharacterAppearance } from '../App';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -12,12 +12,16 @@ const RENDER_DISTANCE_IN_CHUNKS = 5;
 const TREE_DENSITY = 0.1; 
 const BUSH_DENSITY = 0.08;
 const DIRT_PATCH_DENSITY = 0.15;
+const FLOWER_DENSITY = 0.15;
+const MUSHROOM_DENSITY = 0.08;
+const GRASS_DENSITY = 0.3;
 const BIRD_TREE_CHANCE = 0.4;
 const NEST_CHANCE = 0.3;
-const VILLAGE_DENSITY = 0.04; // Chance per chunk to spawn a village
+const VILLAGE_DENSITY = 0.04; 
 
 // --- Game Constants ---
-const PLAYER_SPEED = 5;
+const PLAYER_SPEED = 9;
+const PLAYER_RUN_MULTIPLIER = 2;
 const PLAYER_ROTATION_SPEED = 3;
 const GRAVITY = 30;
 const JUMP_FORCE = 10;
@@ -166,6 +170,23 @@ const createCloudTexture = (): THREE.CanvasTexture => {
     return new THREE.CanvasTexture(canvas);
 }
 
+const createParticleTexture = (): THREE.CanvasTexture => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const context = canvas.getContext('2d')!;
+    const gradient = context.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.2, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.6, 'rgba(255,255,255,0.5)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 64, 64);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+};
+
 // --- Pre-created Geometries & Materials for Instancing ---
 const leafGeometry = new THREE.BoxGeometry(2, 2, 2);
 const leafMaterial = new THREE.MeshLambertMaterial({ color: 0x228B22 });
@@ -180,6 +201,28 @@ const dirtMaterial = new THREE.MeshLambertMaterial({ map: dirtTexture });
 
 const nestMaterial = new THREE.MeshLambertMaterial({ color: 0x8B5F47 });
 const nestTwigGeo = new THREE.BoxGeometry(0.2, 0.2, 1.5);
+
+// --- Flora Geometries & Materials ---
+const flowerStemGeo = new THREE.BoxGeometry(0.1, 0.5, 0.1);
+const flowerHeadGeo = new THREE.BoxGeometry(0.4, 0.4, 0.4);
+const flowerStemMat = new THREE.MeshLambertMaterial({ color: 0x006400 });
+const flowerMaterials = {
+    red: new THREE.MeshLambertMaterial({ color: 0xFF0000 }),
+    yellow: new THREE.MeshLambertMaterial({ color: 0xFFFF00 }),
+    blue: new THREE.MeshLambertMaterial({ color: 0x4169E1 }),
+};
+
+const mushroomStalkGeo = new THREE.CylinderGeometry(0.15, 0.2, 0.6, 6);
+const mushroomCapGeo = new THREE.SphereGeometry(0.4, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2);
+const mushroomMaterials = {
+    redCap: new THREE.MeshLambertMaterial({ color: 0xB22222 }),
+    brownCap: new THREE.MeshLambertMaterial({ color: 0x8B4513 }),
+    stalk: new THREE.MeshLambertMaterial({ color: 0xF5F5DC }),
+};
+
+const grassBladeGeo = new THREE.BoxGeometry(0.1, 1.2, 0.1);
+const grassMaterialGeneric = new THREE.MeshLambertMaterial({ color: 0x2E8B57 });
+
 
 // --- Bird Component Geometries & Materials ---
 const birdBodyGeo = new THREE.BufferGeometry();
@@ -246,6 +289,174 @@ const cobblestoneMat = new THREE.MeshLambertMaterial({ color: 0x808080 });
 const farmlandMat = new THREE.MeshLambertMaterial({ color: 0x6B4226 });
 const waterMat = new THREE.MeshLambertMaterial({ color: 0x4682B4, transparent: true, opacity: 0.8 });
 const cropMat = new THREE.MeshLambertMaterial({ color: 0x00FF00 });
+
+// --- Particle System ---
+interface Particle {
+    active: boolean;
+    position: THREE.Vector3;
+    velocity: THREE.Vector3;
+    life: number;
+    maxLife: number;
+    size: number;
+    startSize: number;
+    endSize: number;
+    color: THREE.Color;
+    startColor: THREE.Color;
+    endColor: THREE.Color;
+    rotation: number;
+    rotationSpeed: number;
+}
+
+interface ParticleEmitterOptions {
+    position: THREE.Vector3;
+    count: number;
+    color?: THREE.Color | [THREE.Color, THREE.Color];
+    velocity?: THREE.Vector3;
+    velocityRandomness?: number;
+    size?: number | [number, number];
+    life?: number | [number, number];
+    gravity?: number;
+    rotationSpeed?: number | [number, number];
+}
+
+class ParticleSystem {
+    private scene: THREE.Scene;
+    private particles: Particle[] = [];
+    private mesh: THREE.InstancedMesh;
+    private dummy = new THREE.Object3D();
+    private gravity: number;
+    
+    constructor(scene: THREE.Scene, count: number, texture: THREE.Texture, gravity: number = 0, blending: THREE.Blending = THREE.AdditiveBlending) {
+        this.scene = scene;
+        this.gravity = gravity;
+        
+        const geometry = new THREE.PlaneGeometry(1, 1);
+        const material = new THREE.MeshBasicMaterial({
+            map: texture,
+            blending: blending,
+            depthWrite: false,
+            transparent: true,
+            vertexColors: true
+        });
+
+        this.mesh = new THREE.InstancedMesh(geometry, material, count);
+        this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+        
+        for (let i = 0; i < count; i++) {
+            this.particles.push({
+                active: false,
+                position: new THREE.Vector3(),
+                velocity: new THREE.Vector3(),
+                life: 0,
+                maxLife: 1,
+                size: 1,
+                startSize: 1,
+                endSize: 0,
+                color: new THREE.Color(),
+                startColor: new THREE.Color(),
+                endColor: new THREE.Color(),
+                rotation: 0,
+                rotationSpeed: 0,
+            });
+        }
+        
+        this.scene.add(this.mesh);
+    }
+
+    emit(options: ParticleEmitterOptions) {
+        let created = 0;
+        for (let i = 0; i < this.particles.length && created < options.count; i++) {
+            if (!this.particles[i].active) {
+                this.initParticle(this.particles[i], options);
+                created++;
+            }
+        }
+    }
+
+    private initParticle(p: Particle, options: ParticleEmitterOptions) {
+        p.active = true;
+        p.position.copy(options.position);
+        
+        const baseVelocity = options.velocity || new THREE.Vector3();
+        p.velocity.copy(baseVelocity).add(
+            new THREE.Vector3(
+                (Math.random() - 0.5),
+                (Math.random() - 0.5),
+                (Math.random() - 0.5)
+            ).multiplyScalar(options.velocityRandomness || 0)
+        );
+
+        p.maxLife = Array.isArray(options.life) 
+            ? THREE.MathUtils.lerp(options.life[0], options.life[1], Math.random())
+            : options.life || 1;
+        p.life = p.maxLife;
+
+        const size = Array.isArray(options.size) 
+            ? THREE.MathUtils.lerp(options.size[0], options.size[1], Math.random())
+            : options.size || 1;
+        p.startSize = size;
+        p.endSize = 0;
+        p.size = p.startSize;
+        
+        const color = Array.isArray(options.color) 
+            ? options.color[0].clone().lerp(options.color[1], Math.random())
+            : options.color || new THREE.Color(0xffffff);
+        p.startColor.copy(color);
+        p.endColor.copy(color);
+        p.color.copy(p.startColor);
+
+        p.rotation = Math.random() * Math.PI * 2;
+        p.rotationSpeed = Array.isArray(options.rotationSpeed) 
+            ? THREE.MathUtils.lerp(options.rotationSpeed[0], options.rotationSpeed[1], Math.random())
+            : options.rotationSpeed || 0;
+    }
+
+    update(delta: number, camera: THREE.Camera) {
+        let colorNeedsUpdate = false;
+        let matrixNeedsUpdate = false;
+
+        for (let i = 0; i < this.particles.length; i++) {
+            const p = this.particles[i];
+            if (!p.active) continue;
+
+            p.life -= delta;
+            if (p.life <= 0) {
+                p.active = false;
+                this.dummy.scale.set(0, 0, 0);
+                this.mesh.setMatrixAt(i, this.dummy.matrix);
+                matrixNeedsUpdate = true;
+                continue;
+            }
+
+            p.velocity.y -= (this.gravity) * delta;
+            p.position.add(p.velocity.clone().multiplyScalar(delta));
+
+            const lifeRatio = p.life / p.maxLife;
+            p.size = THREE.MathUtils.lerp(p.endSize, p.startSize, lifeRatio);
+            p.color.copy(p.startColor).lerp(p.endColor, 1 - lifeRatio);
+            p.rotation += p.rotationSpeed * delta;
+            
+            this.dummy.position.copy(p.position);
+            this.dummy.scale.set(p.size, p.size, p.size);
+            this.dummy.rotation.setFromQuaternion(camera.quaternion); // Billboard
+            this.dummy.rotateZ(p.rotation);
+
+            this.mesh.setMatrixAt(i, this.dummy.matrix);
+            this.mesh.setColorAt(i, p.color);
+            colorNeedsUpdate = true;
+            matrixNeedsUpdate = true;
+        }
+
+        if (matrixNeedsUpdate) this.mesh.instanceMatrix.needsUpdate = true;
+        if (colorNeedsUpdate) this.mesh.instanceColor!.needsUpdate = true;
+    }
+    
+    dispose() {
+        this.mesh.geometry.dispose();
+        (this.mesh.material as THREE.Material).dispose();
+        this.scene.remove(this.mesh);
+    }
+}
 
 const createBirdInstance = (): THREE.Group => {
     const bird = new THREE.Group();
@@ -348,36 +559,42 @@ const createVillager = (profession: VillagerProfession, seed: number): THREE.Gro
         }
     }
 
-    const armGroup = new THREE.Group();
-    armGroup.position.y = 4.0;
-    
+    const leftArmGroup = new THREE.Group();
+    leftArmGroup.position.set(-1.4, 4.0, 0);
     const leftArm = new THREE.Mesh(villagerArmGeo, baseRobeMat);
     leftArm.castShadow = true;
-    leftArm.position.x = -1.4;
     leftArm.position.y = -1.25;
-    armGroup.add(leftArm);
+    leftArmGroup.add(leftArm);
+    villager.add(leftArmGroup);
 
+    const rightArmGroup = new THREE.Group();
+    rightArmGroup.position.set(1.4, 4.0, 0);
     const rightArm = new THREE.Mesh(villagerArmGeo, baseRobeMat);
     rightArm.castShadow = true;
-    rightArm.position.x = 1.4;
     rightArm.position.y = -1.25;
-    armGroup.add(rightArm);
-    villager.add(armGroup);
+    rightArmGroup.add(rightArm);
+    villager.add(rightArmGroup);
 
+    const leftLegGroup = new THREE.Group();
+    leftLegGroup.position.set(-0.5, 1.5, 0);
     const leftLeg = new THREE.Mesh(villagerLegGeo, baseRobeMat);
     leftLeg.castShadow = true;
-    leftLeg.position.set(-0.5, 0.75, 0);
-    villager.add(leftLeg);
+    leftLeg.position.y = -0.75;
+    leftLegGroup.add(leftLeg);
+    villager.add(leftLegGroup);
 
+    const rightLegGroup = new THREE.Group();
+    rightLegGroup.position.set(0.5, 1.5, 0);
     const rightLeg = new THREE.Mesh(villagerLegGeo, baseRobeMat);
     rightLeg.castShadow = true;
-    rightLeg.position.set(0.5, 0.75, 0);
-    villager.add(rightLeg);
+    rightLeg.position.y = -0.75;
+    rightLegGroup.add(rightLeg);
+    villager.add(rightLegGroup);
     
-    villager.userData.leftArm = leftArm;
-    villager.userData.rightArm = rightArm;
-    villager.userData.leftLeg = leftLeg;
-    villager.userData.rightLeg = rightLeg;
+    villager.userData.leftArm = leftArmGroup;
+    villager.userData.rightArm = rightArmGroup;
+    villager.userData.leftLeg = leftLegGroup;
+    villager.userData.rightLeg = rightLegGroup;
     villager.userData.headGroup = headGroup;
 
     return villager;
@@ -751,7 +968,7 @@ const createCharacter = (appearance: CharacterAppearance): CharacterHandles => {
 const createDog = (): THREE.Group => {
   const dog = new THREE.Group();
   const bodyMat = new THREE.MeshLambertMaterial({ color: 0xCCCCCC });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 2), bodyMat);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1, 2), bodyMat);
   body.position.y = 1.5;
   body.castShadow = true;
   dog.add(body);
@@ -801,6 +1018,42 @@ const pseudoRandom = (seed: number) => {
   let x = Math.sin(seed++) * 10000;
   return x - Math.floor(x);
 };
+
+// Simple Noise function for flora density
+const createNoise2D = (seed: number) => {
+    const perm: number[] = [];
+    for (let i = 0; i < 256; i++) {
+        perm.push(Math.floor(pseudoRandom(seed + i * 1.1) * 256));
+    }
+    const p = perm.concat(perm);
+    
+    const fade = (t: number) => t * t * t * (t * (t * 6 - 15) + 10);
+    const lerp = (t: number, a: number, b: number) => a + t * (b - a);
+    const grad = (hash: number, x: number, y: number) => {
+        const h = hash & 15;
+        const u = h < 8 ? x : y;
+        const v = h < 8 ? y : x;
+        return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+    };
+
+    return (x: number, y: number) => {
+        const X = Math.floor(x) & 255;
+        const Y = Math.floor(y) & 255;
+        x -= Math.floor(x);
+        y -= Math.floor(y);
+        const u = fade(x);
+        const v = fade(y);
+        const aa = p[p[X] + Y];
+        const ab = p[p[X] + Y + 1];
+        const ba = p[p[X + 1] + Y];
+        const bb = p[p[X + 1] + Y + 1];
+        
+        return lerp(v, lerp(u, grad(p[aa], x, y), grad(p[ba], x - 1, y)),
+                       lerp(u, grad(p[ab], x, y - 1), grad(p[bb], x - 1, y - 1)));
+    };
+};
+const floraNoise = createNoise2D(12345);
+
 
 // --- Terrain Generation ---
 const getHeight = (x: number, z: number): number => {
@@ -925,6 +1178,72 @@ const findNewLandingSpot = (tree: THREE.Group): THREE.Vector3 => {
     return leafPosition;
 };
 
+// --- Gun Creation ---
+const createGunLibrary = () => {
+  const darkMetal = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.4, metalness: 0.8 });
+  const wood = new THREE.MeshLambertMaterial({ color: 0x654321 });
+  const gold = new THREE.MeshStandardMaterial({ color: 0xffd700, roughness: 0.2, metalness: 1.0 });
+
+  const guns = [
+    { name: "Pistol", fireRate: 0.2, model: new THREE.Group() },
+    { name: "SMG", fireRate: 0.08, model: new THREE.Group() },
+    { name: "Shotgun", fireRate: 1.0, model: new THREE.Group() },
+    { name: "Rifle", fireRate: 0.5, model: new THREE.Group() },
+    { name: "Sniper", fireRate: 1.5, model: new THREE.Group() },
+    { name: "Revolver", fireRate: 0.6, model: new THREE.Group() },
+    { name: "LMG", fireRate: 0.1, model: new THREE.Group() },
+    { name: "Golden Gun", fireRate: 0.3, model: new THREE.Group() },
+    { name: "Blaster", fireRate: 0.4, model: new THREE.Group() },
+  ];
+
+  // Pistol
+  const pistolBody = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.3, 0.8), darkMetal);
+  const pistolGrip = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.6, 0.3), darkMetal);
+  pistolGrip.position.set(0, -0.3, 0.2);
+  pistolGrip.rotation.x = 0.2;
+  guns[0].model.add(pistolBody, pistolGrip);
+  
+  // SMG
+  const smgBody = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 1.2), darkMetal);
+  const smgGrip = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.7, 0.3), darkMetal);
+  smgGrip.position.set(0, -0.3, 0.2);
+  const smgStock = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.2, 0.8), darkMetal);
+  smgStock.position.set(0, 0, 0.9);
+  guns[1].model.add(smgBody, smgGrip, smgStock);
+
+  // Shotgun
+  const sgBody = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 2.5), wood);
+  sgBody.position.z = 0.5;
+  const sgBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 2, 8), darkMetal);
+  sgBarrel.rotation.x = Math.PI / 2;
+  sgBarrel.position.set(0, 0.1, 0.2);
+  guns[2].model.add(sgBody, sgBarrel);
+
+  // Rifle
+  const rifleBody = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.3, 2), wood);
+  const rifleBarrel = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.5, 8), darkMetal);
+  rifleBarrel.rotation.x = Math.PI / 2;
+  rifleBarrel.position.set(0, 0, -1.2);
+  guns[3].model.add(rifleBody, rifleBarrel);
+
+  // Copy models for remaining guns for now
+  guns[4].model = guns[3].model.clone(); // Sniper
+  guns[5].model = guns[0].model.clone(); // Revolver
+  guns[6].model = guns[1].model.clone(); // LMG
+  guns[7].model = guns[0].model.clone(); // Golden Gun
+  guns[7].model.traverse(c => { if(c instanceof THREE.Mesh) c.material = gold; });
+  guns[8].model = guns[1].model.clone(); // Blaster
+
+  guns.forEach(gun => {
+      gun.model.position.set(0.6, -1.2, 0.5);
+      gun.model.rotation.y = -0.2;
+      gun.model.scale.set(0.8, 0.8, 0.8);
+  });
+
+  return guns;
+};
+
+
 interface MinecraftSceneProps {
   move: MoveVector;
   isJumping: boolean;
@@ -933,9 +1252,17 @@ interface MinecraftSceneProps {
   characterAppearance: CharacterAppearance;
   onCameraToggle: () => void;
   interacted: boolean;
+  sfxVolume: number;
+  musicVolume: number;
+  isMuted: boolean;
+  currentWeaponIndex: number | null;
+  onWeaponSwitch: (index: number | null) => void;
+  showDebugView: boolean;
+  onToggleDebugView: () => void;
 }
 
-const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJumpEnd, cameraMode, characterAppearance, onCameraToggle, interacted }) => {
+const MinecraftScene: React.FC<MinecraftSceneProps> = (props) => {
+  const { move, isJumping, onJumpEnd, cameraMode, characterAppearance, onCameraToggle, interacted, sfxVolume, musicVolume, isMuted, currentWeaponIndex, onWeaponSwitch, showDebugView, onToggleDebugView } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const birdsRef = useRef<THREE.Group[]>([]);
   const villagersRef = useRef<THREE.Group[]>([]);
@@ -946,14 +1273,26 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
   
   const audioListenerRef = useRef<THREE.AudioListener | null>(null);
   const windGainRef = useRef<GainNode | null>(null);
+  const sfxGainRef = useRef<GainNode | null>(null);
+  const musicGainRef = useRef<GainNode | null>(null);
   const birdChirpBufferRef = useRef<AudioBuffer | null>(null);
   const villageSoundsBufferRef = useRef<AudioBuffer | null>(null);
+  const gunshotBufferRef = useRef<AudioBuffer | null>(null);
+  
+  const gunLibrary = useMemo(() => createGunLibrary(), []);
+  const currentWeaponRef = useRef<THREE.Group | null>(null);
+  const lastShotTimeRef = useRef(0);
+  const activeTracersRef = useRef<THREE.Line[]>([]);
+
 
   const moveRef = useRef(move);
   const isJumpingRef = useRef(isJumping);
   const onJumpEndRef = useRef(onJumpEnd);
   const cameraModeRef = useRef(cameraMode);
   const onCameraToggleRef = useRef(onCameraToggle);
+  const onWeaponSwitchRef = useRef(onWeaponSwitch);
+  const currentWeaponIndexRef = useRef(currentWeaponIndex);
+  const onToggleDebugViewRef = useRef(onToggleDebugView);
   const keysPressed = useRef<{ [key: string]: boolean }>({});
 
   useEffect(() => {
@@ -962,15 +1301,29 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     onJumpEndRef.current = onJumpEnd;
     cameraModeRef.current = cameraMode;
     onCameraToggleRef.current = onCameraToggle;
-  }, [move, isJumping, onJumpEnd, cameraMode, onCameraToggle]);
+    onWeaponSwitchRef.current = onWeaponSwitch;
+    currentWeaponIndexRef.current = currentWeaponIndex;
+    onToggleDebugViewRef.current = onToggleDebugView;
+  }, [move, isJumping, onJumpEnd, cameraMode, onCameraToggle, currentWeaponIndex, onWeaponSwitch, onToggleDebugView]);
+
+   useEffect(() => {
+    if (sfxGainRef.current) sfxGainRef.current.gain.setTargetAtTime(sfxVolume, sfxGainRef.current.context.currentTime, 0.1);
+  }, [sfxVolume]);
+
+  useEffect(() => {
+    if (musicGainRef.current) musicGainRef.current.gain.setTargetAtTime(musicVolume, musicGainRef.current.context.currentTime, 0.1);
+  }, [musicVolume]);
+
+  useEffect(() => {
+    if (audioListenerRef.current) {
+      audioListenerRef.current.setMasterVolume(isMuted ? 0 : 1);
+    }
+  }, [isMuted]);
 
   useEffect(() => {
     if (interacted) {
         if (audioListenerRef.current && audioListenerRef.current.context.state === 'suspended') {
             audioListenerRef.current.context.resume().catch(e => console.error("Audio context could not be resumed:", e));
-        }
-        if (windGainRef.current && audioListenerRef.current) {
-            windGainRef.current.gain.setTargetAtTime(0.05, audioListenerRef.current.context.currentTime, 0.5);
         }
     }
   }, [interacted]);
@@ -1028,16 +1381,6 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     rendererRef.current = renderer;
     container.appendChild(renderer.domElement);
 
-    const composer = new EffectComposer(renderer);
-    const renderPass = new RenderPass(scene, thirdPersonCamera);
-    composer.addPass(renderPass);
-
-    const bloomPass = new UnrealBloomPass(
-        new THREE.Vector2(container.clientWidth, container.clientHeight),
-        0.5, 0.4, 0.85
-    );
-    composer.addPass(bloomPass);
-
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.1);
     scene.add(ambientLight);
 
@@ -1074,14 +1417,29 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     const startY = getHeight(0, 5) + 1;
     character.position.set(0, startY, 5);
     scene.add(character);
+
+    currentWeaponRef.current = new THREE.Group();
+    handles.rightArm.add(currentWeaponRef.current);
     
     const listener = new THREE.AudioListener();
     audioListenerRef.current = listener;
     handles.neckGroup.add(listener);
 
-    // --- Procedural Audio Generation ---
+    // --- Particle Systems ---
+    const particleTexture = createParticleTexture();
+    const dustSystem = new ParticleSystem(scene, 100, particleTexture, 0, THREE.NormalBlending);
+    const sparkSystem = new ParticleSystem(scene, 100, particleTexture, 10.0, THREE.AdditiveBlending);
+
+    // --- Audio Graph Setup ---
     const audioContext = listener.context;
-    // Wind sound
+    sfxGainRef.current = audioContext.createGain();
+    sfxGainRef.current.gain.value = sfxVolume;
+    sfxGainRef.current.connect(listener.getInput());
+
+    musicGainRef.current = audioContext.createGain();
+    musicGainRef.current.gain.value = musicVolume;
+    musicGainRef.current.connect(listener.getInput());
+
     const windNode = audioContext.createBufferSource();
     const bufferSize = audioContext.sampleRate * 2;
     const windBuffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
@@ -1091,15 +1449,10 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     windNode.loop = true;
     const windFilter = audioContext.createBiquadFilter();
     windFilter.type = 'lowpass'; windFilter.frequency.value = 400; windFilter.Q.value = 5;
-    const windGain = audioContext.createGain();
-    windGain.gain.value = 0;
-    windGainRef.current = windGain;
     windNode.connect(windFilter);
-    windFilter.connect(windGain);
-    windGain.connect(listener.getInput());
+    windFilter.connect(musicGainRef.current);
     windNode.start(0);
 
-    // Bird chirp buffer
     const createChirpBuffer = (ctx: AudioContext): AudioBuffer => {
         const duration = 0.2;
         const sr = ctx.sampleRate;
@@ -1116,7 +1469,6 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     };
     birdChirpBufferRef.current = createChirpBuffer(audioContext);
     
-    // Village sounds buffer
     const createVillageSoundsBuffer = (ctx: AudioContext): AudioBuffer => {
         const duration = 10;
         const sr = ctx.sampleRate;
@@ -1139,6 +1491,23 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         return buffer;
     };
     villageSoundsBufferRef.current = createVillageSoundsBuffer(audioContext);
+    
+    const createGunshotBuffer = (ctx: AudioContext): AudioBuffer => {
+        const duration = 0.3;
+        const sr = ctx.sampleRate;
+        const bufSize = sr * duration;
+        const buffer = ctx.createBuffer(1, bufSize, sr);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufSize; i++) {
+            data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize) * 0.8;
+        }
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 2000;
+        return buffer;
+    };
+    gunshotBufferRef.current = createGunshotBuffer(audioContext);
+
 
     firstPersonCamera.position.set(0, 0.1, 0.5);
     firstPersonCamera.rotation.y = Math.PI;
@@ -1174,6 +1543,18 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
             const grassMatrices: THREE.Matrix4[] = [];
             const dirtTopMatrices: THREE.Matrix4[] = [];
             const dirtBaseMatrices: THREE.Matrix4[] = [];
+            
+            const flowerStemMatrices: THREE.Matrix4[] = [];
+            const redFlowerHeadMatrices: THREE.Matrix4[] = [];
+            const yellowFlowerHeadMatrices: THREE.Matrix4[] = [];
+            const blueFlowerHeadMatrices: THREE.Matrix4[] = [];
+            const mushroomStalkMatrices: THREE.Matrix4[] = [];
+            const redMushroomCapMatrices: THREE.Matrix4[] = [];
+            const brownMushroomCapMatrices: THREE.Matrix4[] = [];
+            const grassBladesMatrices: THREE.Matrix4[] = [];
+            
+            const localTrees: THREE.Vector3[] = [];
+
             for (let i = 0; i < CHUNK_SIZE; i += 2) {
               for (let j = 0; j < CHUNK_SIZE; j += 2) {
                 const worldX = x * CHUNK_SIZE + i - CHUNK_SIZE / 2 + 1;
@@ -1182,18 +1563,111 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                 const blockSeed = Math.floor(worldX) * 1839 + Math.floor(worldZ) * 3847;
                 
                 matrixDummy.position.set(i - CHUNK_SIZE / 2 + 1, groundY - 1.75, j - CHUNK_SIZE / 2 + 1);
+                matrixDummy.rotation.set(0,0,0);
                 matrixDummy.updateMatrix();
                 dirtBaseMatrices.push(matrixDummy.matrix.clone());
 
                 matrixDummy.position.set(i - CHUNK_SIZE / 2 + 1, groundY - 0.25, j - CHUNK_SIZE / 2 + 1);
                 matrixDummy.updateMatrix();
-                if (pseudoRandom(blockSeed) > DIRT_PATCH_DENSITY) {
+
+                const isDirtPatch = pseudoRandom(blockSeed) <= DIRT_PATCH_DENSITY;
+                
+                if (!isDirtPatch) {
                     grassMatrices.push(matrixDummy.matrix.clone());
+                    
+                    const floraDensity = (floraNoise(worldX / 50, worldZ / 50) + 1) / 2;
+                    const floraSeed = blockSeed * 3;
+
+                    if (pseudoRandom(floraSeed) < FLOWER_DENSITY * floraDensity) {
+                        const flowerX = i - CHUNK_SIZE / 2 + 1 + (pseudoRandom(floraSeed * 2) - 0.5);
+                        const flowerZ = j - CHUNK_SIZE / 2 + 1 + (pseudoRandom(floraSeed * 3) - 0.5);
+                        const flowerY = getHeight(x * CHUNK_SIZE + flowerX, z * CHUNK_SIZE + flowerZ);
+
+                        matrixDummy.position.set(flowerX, flowerY + 0.25, flowerZ);
+                        matrixDummy.updateMatrix();
+                        flowerStemMatrices.push(matrixDummy.matrix.clone());
+
+                        matrixDummy.position.set(flowerX, flowerY + 0.5, flowerZ);
+                        matrixDummy.updateMatrix();
+                        
+                        const colorRand = pseudoRandom(floraSeed * 5);
+                        if (colorRand < 0.4) redFlowerHeadMatrices.push(matrixDummy.matrix.clone());
+                        else if (colorRand < 0.8) yellowFlowerHeadMatrices.push(matrixDummy.matrix.clone());
+                        else blueFlowerHeadMatrices.push(matrixDummy.matrix.clone());
+                    }
+                    
+                    if (pseudoRandom(floraSeed + 10) < GRASS_DENSITY * floraDensity * 2) {
+                        const grassX = i - CHUNK_SIZE / 2 + 1 + (pseudoRandom(floraSeed * 11) - 0.5);
+                        const grassZ = j - CHUNK_SIZE / 2 + 1 + (pseudoRandom(floraSeed * 12) - 0.5);
+                        const grassY = getHeight(x * CHUNK_SIZE + grassX, z * CHUNK_SIZE + grassZ);
+                        
+                        const numBlades = 2 + Math.floor(pseudoRandom(floraSeed * 13) * 3);
+                        for (let k = 0; k < numBlades; k++) {
+                            matrixDummy.position.set(grassX, grassY + 0.6, grassZ);
+                             matrixDummy.rotation.set(
+                                (pseudoRandom(floraSeed * 15 + k) - 0.5) * 0.4,
+                                pseudoRandom(floraSeed * 14 + k) * Math.PI * 2,
+                                (pseudoRandom(floraSeed * 16 + k) - 0.5) * 0.4
+                            );
+                            matrixDummy.updateMatrix();
+                            grassBladesMatrices.push(matrixDummy.matrix.clone());
+                        }
+                    }
                 } else {
                     dirtTopMatrices.push(matrixDummy.matrix.clone());
                 }
+                
+                const floraSeedMush = blockSeed * 5;
+                const floraDensityMush = (floraNoise(worldX / 20, worldZ / 20) + 1) / 2;
+                if ((isDirtPatch) && pseudoRandom(floraSeedMush) < MUSHROOM_DENSITY * floraDensityMush) {
+                    const mushX = i - CHUNK_SIZE / 2 + 1 + (pseudoRandom(floraSeedMush * 6) - 0.5);
+                    const mushZ = j - CHUNK_SIZE / 2 + 1 + (pseudoRandom(floraSeedMush * 7) - 0.5);
+                    const mushY = getHeight(x * CHUNK_SIZE + mushX, z * CHUNK_SIZE + mushZ);
+
+                    matrixDummy.position.set(mushX, mushY + 0.3, mushZ);
+                    matrixDummy.rotation.set(0,0,0);
+                    matrixDummy.updateMatrix();
+                    mushroomStalkMatrices.push(matrixDummy.matrix.clone());
+
+                    matrixDummy.position.set(mushX, mushY + 0.6, mushZ);
+                    matrixDummy.updateMatrix();
+                    
+                    if (pseudoRandom(floraSeedMush * 9) < 0.6) brownMushroomCapMatrices.push(matrixDummy.matrix.clone());
+                    else redMushroomCapMatrices.push(matrixDummy.matrix.clone());
+                }
               }
             }
+
+            const seed = x * 1839 + z * 3847;
+            if (pseudoRandom(seed) < TREE_DENSITY) {
+                const treeX = (pseudoRandom(seed * 2) - 0.5) * CHUNK_SIZE * 0.8;
+                const treeZ = (pseudoRandom(seed * 3) - 0.5) * CHUNK_SIZE * 0.8;
+                localTrees.push(new THREE.Vector3(treeX, 0, treeZ));
+            }
+            
+            localTrees.forEach(treePos => {
+                for(let k = 0; k < 15; k++) {
+                    const angle = pseudoRandom(seed * k * 5) * Math.PI * 2;
+                    const radius = 1 + pseudoRandom(seed * k * 7) * 3;
+                    const grassX = treePos.x + Math.cos(angle) * radius;
+                    const grassZ = treePos.z + Math.sin(angle) * radius;
+                    const grassY = getHeight(chunkGroup.position.x + grassX, chunkGroup.position.z + grassZ);
+                    
+                    const numBlades = 2 + Math.floor(pseudoRandom(seed * k * 9) * 3);
+                    for (let l = 0; l < numBlades; l++) {
+                        matrixDummy.position.set(grassX, grassY + 0.6, grassZ);
+                        matrixDummy.rotation.set(
+                            (pseudoRandom(seed * 15 + l) - 0.5) * 0.4,
+                             pseudoRandom(seed * 14 + l) * Math.PI * 2,
+                            (pseudoRandom(seed * 16 + l) - 0.5) * 0.4
+                        );
+                        matrixDummy.updateMatrix();
+                        grassBladesMatrices.push(matrixDummy.matrix.clone());
+                    }
+                }
+            });
+
+
             const instancedDirtBase = new THREE.InstancedMesh(groundBaseGeo, dirtMaterial, dirtBaseMatrices.length);
             instancedDirtBase.receiveShadow = true;
             dirtBaseMatrices.forEach((m, i) => instancedDirtBase.setMatrixAt(i, m));
@@ -1210,12 +1684,51 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
               dirtTopMatrices.forEach((m, i) => instancedDirtTop.setMatrixAt(i, m));
               chunkGroup.add(instancedDirtTop);
             }
-            const seed = x * 1839 + z * 3847;
-            if (pseudoRandom(seed) < TREE_DENSITY) {
-              const treeX = (pseudoRandom(seed * 2) - 0.5) * CHUNK_SIZE * 0.8;
-              const treeZ = (pseudoRandom(seed * 3) - 0.5) * CHUNK_SIZE * 0.8;
-              const tree = createTree(treeX, treeZ, seed);
-              tree.position.y = getHeight(chunkGroup.position.x + treeX, chunkGroup.position.z + treeZ);
+
+            if (flowerStemMatrices.length > 0) {
+                const mesh = new THREE.InstancedMesh(flowerStemGeo, flowerStemMat, flowerStemMatrices.length);
+                flowerStemMatrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+                chunkGroup.add(mesh);
+            }
+            if (redFlowerHeadMatrices.length > 0) {
+                const mesh = new THREE.InstancedMesh(flowerHeadGeo, flowerMaterials.red, redFlowerHeadMatrices.length);
+                redFlowerHeadMatrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+                chunkGroup.add(mesh);
+            }
+            if (yellowFlowerHeadMatrices.length > 0) {
+                const mesh = new THREE.InstancedMesh(flowerHeadGeo, flowerMaterials.yellow, yellowFlowerHeadMatrices.length);
+                yellowFlowerHeadMatrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+                chunkGroup.add(mesh);
+            }
+            if (blueFlowerHeadMatrices.length > 0) {
+                const mesh = new THREE.InstancedMesh(flowerHeadGeo, flowerMaterials.blue, blueFlowerHeadMatrices.length);
+                blueFlowerHeadMatrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+                chunkGroup.add(mesh);
+            }
+            if (mushroomStalkMatrices.length > 0) {
+                const mesh = new THREE.InstancedMesh(mushroomStalkGeo, mushroomMaterials.stalk, mushroomStalkMatrices.length);
+                mushroomStalkMatrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+                chunkGroup.add(mesh);
+            }
+            if (redMushroomCapMatrices.length > 0) {
+                const mesh = new THREE.InstancedMesh(mushroomCapGeo, mushroomMaterials.redCap, redMushroomCapMatrices.length);
+                redMushroomCapMatrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+                chunkGroup.add(mesh);
+            }
+            if (brownMushroomCapMatrices.length > 0) {
+                const mesh = new THREE.InstancedMesh(mushroomCapGeo, mushroomMaterials.brownCap, brownMushroomCapMatrices.length);
+                brownMushroomCapMatrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+                chunkGroup.add(mesh);
+            }
+            if (grassBladesMatrices.length > 0) {
+                const instancedGrass = new THREE.InstancedMesh(grassBladeGeo, grassMaterialGeneric, grassBladesMatrices.length);
+                grassBladesMatrices.forEach((m, i) => instancedGrass.setMatrixAt(i, m));
+                chunkGroup.add(instancedGrass);
+            }
+
+            localTrees.forEach(treePos => {
+              const tree = createTree(treePos.x, treePos.z, seed);
+              tree.position.y = getHeight(chunkGroup.position.x + treePos.x, chunkGroup.position.z + treePos.z);
               chunkGroup.add(tree);
 
               if (pseudoRandom(seed * 5) < BIRD_TREE_CHANCE) {
@@ -1241,6 +1754,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                           birdAudio.setRefDistance(5);
                           birdAudio.setRolloffFactor(2);
                           birdAudio.setVolume(0.8);
+                          birdAudio.getOutput().connect(sfxGainRef.current!);
                           bird.add(birdAudio);
                           bird.userData.audio = birdAudio;
                           
@@ -1256,7 +1770,8 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                       }
                   }
               }
-            }
+            });
+
             if (pseudoRandom(seed*5) < BUSH_DENSITY) {
                 const bushX = (pseudoRandom(seed * 7) - 0.5) * CHUNK_SIZE * 0.9;
                 const bushZ = (pseudoRandom(seed * 11) - 0.5) * CHUNK_SIZE * 0.9;
@@ -1301,6 +1816,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
                     villageAudio.setLoop(true);
                     villageAudio.setVolume(0.6);
                     villageAudio.position.copy(well.position);
+                    villageAudio.getOutput().connect(sfxGainRef.current!);
                     villageGroup.add(villageAudio);
                     if (interacted) villageAudio.play();
                     villageGroup.userData.audio = villageAudio;
@@ -1394,6 +1910,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
     let lastBirdOpacity = -1.0;
     const treeWorldPosHelper = new THREE.Vector3();
     const targetLookAt = new THREE.Vector3();
+    let wasOnGround = true;
 
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
@@ -1405,6 +1922,21 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
       const currentCameraMode = cameraModeRef.current;
       const character = characterHandlesRef.current?.group;
       if (!character) return;
+      
+      const activeCamera = currentCameraMode === 'first-person' ? firstPersonCamera : thirdPersonCamera;
+
+      dustSystem.update(delta, activeCamera);
+      sparkSystem.update(delta, activeCamera);
+
+      activeTracersRef.current.forEach((tracer, index) => {
+          tracer.userData.life -= delta;
+          if (tracer.userData.life <= 0) {
+              scene.remove(tracer);
+              tracer.geometry.dispose();
+              (tracer.material as THREE.Material).dispose();
+              activeTracersRef.current.splice(index, 1);
+          }
+      });
 
       const timeOfDay = ((elapsedTime + START_TIME_OFFSET) / DAY_NIGHT_CYCLE_SECONDS) % 1.0;
       const sunAngle = timeOfDay * Math.PI * 2;
@@ -1784,6 +2316,8 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
 
       // --- Player Movement ---
       let walkMagnitude = 0;
+      let isRunning = false;
+
       if (isMobile) {
         const currentMove = moveRef.current;
         character.rotation.y -= currentMove.x * PLAYER_ROTATION_SPEED * delta;
@@ -1798,10 +2332,13 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         const strafeInput = (keysPressed.current['a'] || keysPressed.current['arrowleft'] ? 1 : 0) - (keysPressed.current['d'] || keysPressed.current['arrowright'] ? 1 : 0);
         
         walkMagnitude = Math.max(Math.abs(forwardInput), Math.abs(strafeInput));
+        
+        isRunning = keysPressed.current['shift'] && walkMagnitude > 0.1;
+        const currentSpeed = isRunning ? PLAYER_SPEED * PLAYER_RUN_MULTIPLIER : PLAYER_SPEED;
 
         if (forwardInput !== 0 || strafeInput !== 0) {
             const moveDirection = new THREE.Vector3(strafeInput, 0, forwardInput).normalize();
-            const moveSpeed = PLAYER_SPEED * delta;
+            const moveSpeed = currentSpeed * delta;
             
             const forwardDir = new THREE.Vector3(Math.sin(character.rotation.y), 0, Math.cos(character.rotation.y));
             const rightDir = new THREE.Vector3(forwardDir.z, 0, -forwardDir.x);
@@ -1812,28 +2349,65 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
       }
       
       const groundYPosition = getHeight(character.position.x, character.position.z) + 1.0;
+      const fallSpeed = playerVelocity.y;
 
       playerVelocity.y -= GRAVITY * delta;
       character.position.y += playerVelocity.y * delta;
-
-      if (isMobile) {
-        if (currentIsJumping && isOnGround) {
-          playerVelocity.y = JUMP_FORCE;
-          isOnGround = false;
-          onJumpEndRef.current();
-        }
-      } else {
-        if (keysPressed.current[' '] && isOnGround) {
-          playerVelocity.y = JUMP_FORCE;
-          isOnGround = false;
-        }
-      }
 
       if (character.position.y <= groundYPosition) {
         character.position.y = groundYPosition;
         playerVelocity.y = 0;
         isOnGround = true;
       }
+      
+      const justLanded = !wasOnGround && isOnGround;
+      if (justLanded && fallSpeed < -5) {
+          dustSystem.emit({
+              position: character.position.clone().sub(new THREE.Vector3(0, 1, 0)),
+              count: 20,
+              color: new THREE.Color(0x8B4513),
+              velocity: new THREE.Vector3(0, 0.5, 0),
+              velocityRandomness: 3,
+              size: [0.5, 1.5],
+              life: [0.5, 1.0],
+              rotationSpeed: [-1, 1],
+          });
+      }
+
+      if (isMobile) {
+        if (currentIsJumping && isOnGround) {
+          dustSystem.emit({
+              position: character.position.clone().sub(new THREE.Vector3(0, 1, 0)),
+              count: 8,
+              color: new THREE.Color(0xcccccc),
+              velocity: new THREE.Vector3(0, 1, 0),
+              velocityRandomness: 1,
+              size: [0.2, 0.4],
+              life: [0.3, 0.6],
+              rotationSpeed: [-2, 2],
+          });
+          playerVelocity.y = JUMP_FORCE;
+          isOnGround = false;
+          onJumpEndRef.current();
+        }
+      } else {
+        if (keysPressed.current[' '] && isOnGround) {
+           dustSystem.emit({
+              position: character.position.clone().sub(new THREE.Vector3(0, 1, 0)),
+              count: 8,
+              color: new THREE.Color(0xcccccc),
+              velocity: new THREE.Vector3(0, 1, 0),
+              velocityRandomness: 1,
+              size: [0.2, 0.4],
+              life: [0.3, 0.6],
+              rotationSpeed: [-2, 2],
+          });
+          playerVelocity.y = JUMP_FORCE;
+          isOnGround = false;
+        }
+      }
+
+      wasOnGround = isOnGround;
       
       const playerChunkX = Math.floor(character.position.x / CHUNK_SIZE);
       const playerChunkZ = Math.floor(character.position.z / CHUNK_SIZE);
@@ -1842,28 +2416,69 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         lastPlayerChunk = { x: playerChunkX, z: playerChunkZ };
       }
       
-      const { leftArm, rightArm, leftLeg, rightLeg } = characterHandlesRef.current!;
+      // --- Player Animation ---
+      const animationSpeedMultiplier = isRunning ? 1.6 : 1.0;
+      const walkCycleTime = elapsedTime * 8 * walkMagnitude * animationSpeedMultiplier;
+
+      const { leftArm, rightArm, leftLeg, rightLeg, neckGroup } = characterHandlesRef.current!;
+      const isWeaponEquipped = currentWeaponIndexRef.current !== null;
+
+      // --- Leg Animation ---
       if (isOnGround && walkMagnitude > 0.1) {
-        const walkSpeed = elapsedTime * 8 * walkMagnitude;
-        const swingAngle = Math.sin(walkSpeed) * 0.6;
-        leftArm.rotation.x = swingAngle;
-        rightArm.rotation.x = -swingAngle;
-        leftLeg.rotation.x = -swingAngle;
-        rightLeg.rotation.x = swingAngle;
+          const swingMagnitude = isRunning ? 0.8 : 0.6;
+          const swingAngle = Math.sin(walkCycleTime) * swingMagnitude;
+          leftLeg.rotation.x = -swingAngle;
+          rightLeg.rotation.x = swingAngle;
       } else if (isOnGround) {
-        leftArm.rotation.x = THREE.MathUtils.lerp(leftArm.rotation.x, 0, delta * 10);
-        rightArm.rotation.x = THREE.MathUtils.lerp(rightArm.rotation.x, 0, delta * 10);
-        leftLeg.rotation.x = THREE.MathUtils.lerp(leftLeg.rotation.x, 0, delta * 10);
-        rightLeg.rotation.x = THREE.MathUtils.lerp(rightLeg.rotation.x, 0, delta * 10);
-      } else {
-        const jumpAngle = 0.5;
-        leftArm.rotation.x = THREE.MathUtils.lerp(leftArm.rotation.x, -jumpAngle, delta * 5);
-        rightArm.rotation.x = THREE.MathUtils.lerp(rightArm.rotation.x, -jumpAngle, delta * 5);
-        leftLeg.rotation.x = THREE.MathUtils.lerp(leftLeg.rotation.x, jumpAngle, delta * 5);
-        rightLeg.rotation.x = THREE.MathUtils.lerp(rightLeg.rotation.x, jumpAngle, delta * 5);
+          leftLeg.rotation.x = THREE.MathUtils.lerp(leftLeg.rotation.x, 0, delta * 10);
+          rightLeg.rotation.x = THREE.MathUtils.lerp(rightLeg.rotation.x, 0, delta * 10);
+      } else { // Jumping
+          const jumpAngle = 0.5;
+          leftLeg.rotation.x = THREE.MathUtils.lerp(leftLeg.rotation.x, jumpAngle, delta * 5);
+          rightLeg.rotation.x = THREE.MathUtils.lerp(rightLeg.rotation.x, jumpAngle, delta * 5);
+      }
+
+      // --- Arm Animation ---
+      if (isWeaponEquipped) {
+          const aimSway = isOnGround && walkMagnitude > 0.1 ? Math.sin(walkCycleTime) * 0.02 : 0;
+          const aimBob = isOnGround && walkMagnitude > 0.1 ? Math.abs(Math.cos(walkCycleTime)) * 0.04 : 0;
+
+          const targetRightArmX = -Math.PI / 2 + neckGroup.rotation.x + aimSway;
+          const targetLeftArmX = -Math.PI / 2 + neckGroup.rotation.x + 0.1 - aimSway;
+          
+          rightArm.rotation.x = THREE.MathUtils.lerp(rightArm.rotation.x, targetRightArmX, delta * 10);
+          rightArm.rotation.y = THREE.MathUtils.lerp(rightArm.rotation.y, -0.2, delta * 10);
+          rightArm.position.y = THREE.MathUtils.lerp(rightArm.position.y, 5.5 + aimBob, delta * 10);
+          rightArm.position.z = 0;
+
+          leftArm.rotation.x = THREE.MathUtils.lerp(leftArm.rotation.x, targetLeftArmX, delta * 10);
+          leftArm.rotation.y = THREE.MathUtils.lerp(leftArm.rotation.y, 0.4, delta * 10);
+          leftArm.position.y = THREE.MathUtils.lerp(leftArm.position.y, 5.5 + aimBob, delta * 10);
+          leftArm.position.z = 0;
+          
+      } else { // No weapon equipped
+          rightArm.position.y = THREE.MathUtils.lerp(rightArm.position.y, 5.5, delta * 10);
+          leftArm.position.y = THREE.MathUtils.lerp(leftArm.position.y, 5.5, delta * 10);
+          rightArm.position.z = THREE.MathUtils.lerp(rightArm.position.z, 0, delta * 10);
+          rightArm.rotation.y = THREE.MathUtils.lerp(rightArm.rotation.y, 0, delta * 10);
+          leftArm.rotation.y = THREE.MathUtils.lerp(leftArm.rotation.y, 0, delta * 10);
+
+          if (isOnGround && walkMagnitude > 0.1) {
+              const swingMagnitude = isRunning ? 0.8 : 0.6;
+              const swingAngle = Math.sin(walkCycleTime) * swingMagnitude;
+              leftArm.rotation.x = swingAngle;
+              rightArm.rotation.x = -swingAngle;
+          } else if (isOnGround) { // Idle
+              leftArm.rotation.x = THREE.MathUtils.lerp(leftArm.rotation.x, 0, delta * 10);
+              rightArm.rotation.x = THREE.MathUtils.lerp(rightArm.rotation.x, 0, delta * 10);
+          } else { // Jumping
+              const jumpAngle = -0.5;
+              leftArm.rotation.x = THREE.MathUtils.lerp(leftArm.rotation.x, jumpAngle, delta * 5);
+              rightArm.rotation.x = THREE.MathUtils.lerp(rightArm.rotation.x, jumpAngle * 0.8, delta * 5);
+          }
       }
       
-      const tail = dog.children[dog.children.length - 1];
+      const tail = dog.children.find(c => c.geometry.type === "BoxGeometry" && c.position.z < -1);
       if (tail) tail.rotation.z = Math.sin(elapsedTime * 5) * 0.4;
 
       const headGroup = characterHandlesRef.current!.headGroup;
@@ -1877,27 +2492,24 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
       
       // --- Camera Logic ---
       if (currentCameraMode === 'third-person') {
-        const neck = characterHandlesRef.current!.neckGroup;
         const idealOffset = CAMERA_OFFSET.clone();
 
         idealOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), character.rotation.y);
         const targetCameraPosition = character.position.clone().add(idealOffset);
         thirdPersonCamera.position.lerp(targetCameraPosition, delta * 15);
 
-        neck.getWorldPosition(targetLookAt);
+        neckGroup.getWorldPosition(targetLookAt);
         const lookDirection = new THREE.Vector3();
-        neck.getWorldDirection(lookDirection);
+        neckGroup.getWorldDirection(lookDirection);
         targetLookAt.add(lookDirection.multiplyScalar(50));
         thirdPersonCamera.lookAt(targetLookAt);
       }
-
-      const activeCamera = currentCameraMode === 'first-person' ? firstPersonCamera : thirdPersonCamera;
-      renderPass.camera = activeCamera;
+      
       
       const { clientWidth, clientHeight } = renderer.domElement;
       renderer.setViewport(0, 0, clientWidth, clientHeight);
       renderer.setScissor(0, 0, clientWidth, clientHeight);
-      composer.render();
+      renderer.render(scene, activeCamera);
 
       // --- Debug View Logic ---
       if (!isMobile && debugCameraRef.current) {
@@ -1914,6 +2526,9 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
             if (debugWidth > 0 && debugHeight > 0) {
                 const isShowingThirdPersonInBox = currentCameraMode === 'first-person';
                 const debugCamToRender = isShowingThirdPersonInBox ? debugCameraRef.current : firstPersonCamera;
+
+                debugCamToRender.aspect = debugWidth / debugHeight;
+                debugCamToRender.updateProjectionMatrix();
 
                 const originalHairVisibility = characterHandlesRef.current!.hairContainer.visible;
                 const originalHeadPartVisibility: { [key: number]: boolean } = {};
@@ -1978,15 +2593,92 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         if (key === 'c') {
             onCameraToggleRef.current();
         }
+        if (key === 'v') {
+            onToggleDebugViewRef.current();
+        }
+        if (key >= '1' && key <= '9') {
+            const index = parseInt(key) - 1;
+            const newIndex = currentWeaponIndexRef.current === index ? null : index;
+            onWeaponSwitchRef.current(newIndex);
+        }
     };
     const handleKeyUp = (event: KeyboardEvent) => { keysPressed.current[event.key.toLowerCase()] = false; };
+    const handleMouseDown = (event: MouseEvent) => {
+        if (document.pointerLockElement !== renderer.domElement) return;
+        if (event.button === 0) { // Left mouse button
+            keysPressed.current['mouse0'] = true;
+            handleShoot();
+        }
+    };
+    const handleMouseUp = (event: MouseEvent) => {
+         if (event.button === 0) {
+            keysPressed.current['mouse0'] = false;
+        }
+    };
     
+    const raycaster = new THREE.Raycaster();
+    const handleShoot = () => {
+        const weaponIndex = currentWeaponIndexRef.current;
+        if (weaponIndex === null) return;
+
+        const gun = gunLibrary[weaponIndex];
+        const now = clock.getElapsedTime();
+        if (now - lastShotTimeRef.current < gun.fireRate) return;
+        lastShotTimeRef.current = now;
+
+        const activeCamera = cameraModeRef.current === 'first-person' ? firstPersonCamera : thirdPersonCamera;
+        raycaster.setFromCamera({ x: 0, y: 0 }, activeCamera);
+        const intersects = raycaster.intersectObjects(scene.children, true);
+
+        let hitPoint = raycaster.ray.at(300, new THREE.Vector3());
+        if (intersects.length > 0) {
+            const firstHit = intersects.find(i => i.object !== characterHandlesRef.current?.group && !characterHandlesRef.current?.group.getObjectById(i.object.id));
+            if (firstHit) {
+                hitPoint = firstHit.point;
+                sparkSystem.emit({
+                    position: firstHit.point,
+                    count: 15,
+                    color: [new THREE.Color(0xffff00), new THREE.Color(0xff8800)],
+                    velocityRandomness: 5,
+                    size: [0.1, 0.3],
+                    life: [0.2, 0.5],
+                });
+            }
+        }
+
+        const muzzlePosition = new THREE.Vector3();
+        currentWeaponRef.current!.getWorldPosition(muzzlePosition);
+        
+        // Tracer
+        const points = [muzzlePosition, hitPoint];
+        const tracerGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const tracerMat = new THREE.LineBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
+        const tracer = new THREE.Line(tracerGeo, tracerMat);
+        tracer.userData.life = 0.05;
+        scene.add(tracer);
+        activeTracersRef.current.push(tracer);
+
+        // Sound
+        if (gunshotBufferRef.current) {
+            const gunshotAudio = new THREE.PositionalAudio(listener);
+            gunshotAudio.setBuffer(gunshotBufferRef.current);
+            gunshotAudio.setRefDistance(20);
+            gunshotAudio.setVolume(0.8);
+            gunshotAudio.getOutput().connect(sfxGainRef.current!);
+            currentWeaponRef.current!.add(gunshotAudio);
+            gunshotAudio.play();
+        }
+    };
+
+
     if (!isMobile) {
       document.addEventListener('pointerlockchange', handlePointerLockChange);
       document.addEventListener('pointerlockerror', handlePointerLockError);
       document.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('keydown', handleKeyDown);
       window.addEventListener('keyup', handleKeyUp);
+      renderer.domElement.addEventListener('mousedown', handleMouseDown);
+      renderer.domElement.addEventListener('mouseup', handleMouseUp);
     }
     
     animate();
@@ -1997,7 +2689,6 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
       firstPersonCamera.aspect = container.clientWidth / container.clientHeight;
       firstPersonCamera.updateProjectionMatrix();
       renderer.setSize(container.clientWidth, container.clientHeight);
-      composer.setSize(container.clientWidth, container.clientHeight);
     };
     window.addEventListener('resize', handleResize);
 
@@ -2029,7 +2720,13 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         document.removeEventListener('mousemove', handleMouseMove);
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
+        renderer.domElement.removeEventListener('mousedown', handleMouseDown);
+        renderer.domElement.removeEventListener('mouseup', handleMouseUp);
       }
+
+      particleTexture.dispose();
+      dustSystem.dispose();
+      sparkSystem.dispose();
 
       sun.geometry.dispose();(sun.material as THREE.Material).dispose();
       moon.geometry.dispose();((moon.material as THREE.MeshStandardMaterial).map as THREE.Texture)?.dispose();(moon.material as THREE.Material).dispose();
@@ -2044,7 +2741,20 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
       groundTopGeo.dispose(); groundBaseGeo.dispose();
       grassTexture.dispose(); dirtTexture.dispose(); grassMaterial.dispose(); dirtMaterial.dispose();
       leafGeometry.dispose(); leafMaterial.dispose(); bushLeafGeo.dispose();
+
+      flowerStemGeo.dispose(); flowerHeadGeo.dispose(); flowerStemMat.dispose();
+      Object.values(flowerMaterials).forEach(m => m.dispose());
+      mushroomStalkGeo.dispose(); mushroomCapGeo.dispose();
+      Object.values(mushroomMaterials).forEach(m => m.dispose());
+      grassBladeGeo.dispose(); grassMaterialGeneric.dispose();
       
+      gunLibrary.forEach(gun => gun.model.traverse(c => {
+          if (c instanceof THREE.Mesh) {
+              c.geometry.dispose();
+              (c.material as THREE.Material).dispose();
+          }
+      }));
+
       villagerSkinMat.dispose(); villagerEyeMat.dispose(); villagerMouthMat.dispose();
       Object.values(villagerHairMaterials).forEach(m => m.dispose());
       Object.values(villagerProfessionMaterials).forEach(m => m.dispose());
@@ -2064,7 +2774,23 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         }
       });
     };
-  }, []);
+  }, [gunLibrary]);
+  
+  // Effect to handle weapon switching
+  useEffect(() => {
+    if (characterHandlesRef.current && currentWeaponRef.current) {
+        // Clear previous weapon
+        while (currentWeaponRef.current.children.length > 0) {
+            currentWeaponRef.current.remove(currentWeaponRef.current.children[0]);
+        }
+        // Add new weapon model
+        if (currentWeaponIndex !== null && gunLibrary[currentWeaponIndex]) {
+            const newWeaponModel = gunLibrary[currentWeaponIndex].model.clone();
+            currentWeaponRef.current.add(newWeaponModel);
+        }
+    }
+  }, [currentWeaponIndex, gunLibrary]);
+
 
   const handleContainerClick = () => {
     // Handle pointer lock for desktop controls.
@@ -2078,20 +2804,24 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = ({ move, isJumping, onJump
         <div ref={containerRef} className="w-full h-full" />
         {!isMobile && !isPointerLocked && (
             <div 
-            className="absolute inset-0 flex items-center justify-center bg-black/50 cursor-pointer pointer-events-none"
-            aria-hidden="true"
+            className="absolute inset-0 flex items-center justify-center bg-black/50 cursor-pointer"
+            onClick={handleContainerClick}
             >
-            <div className="text-center text-white bg-gray-800/80 p-8 rounded-lg shadow-2xl shadow-cyan-500/10 border border-gray-700">
+            <div className="text-center text-white bg-gray-800/80 p-8 rounded-lg shadow-2xl shadow-cyan-500/10 border border-gray-700 pointer-events-none">
                 <h2 className="text-3xl font-bold mb-4">Desktop Controls</h2>
                 <p className="mb-2"><strong className="text-cyan-400">W, A, S, D:</strong> Move</p>
+                <p className="mb-2"><strong className="text-cyan-400">Shift:</strong> Run</p>
                 <p className="mb-2"><strong className="text-cyan-400">Mouse:</strong> Look</p>
                 <p className="mb-2"><strong className="text-cyan-400">Spacebar:</strong> Jump</p>
-                <p className="mb-4"><strong className="text-cyan-400">C:</strong> Toggle Camera</p>
+                <p className="mb-2"><strong className="text-cyan-400">1-9:</strong> Switch Weapon</p>
+                <p className="mb-2"><strong className="text-cyan-400">Click:</strong> Fire</p>
+                <p className="mb-2"><strong className="text-cyan-400">C:</strong> Toggle Camera</p>
+                <p className="mb-4"><strong className="text-cyan-400">V:</strong> Toggle Mini-View</p>
                 <p className="text-xl mt-6 animate-pulse">Click to Start</p>
             </div>
             </div>
         )}
-        {!isMobile && (
+        {!isMobile && showDebugView && (
              <div 
                 id="debug-view-container"
                 className="absolute top-5 right-5 flex flex-col border border-white rounded-md bg-black/40 pointer-events-none shadow-lg"

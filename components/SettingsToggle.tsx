@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
 
-interface CustomizerToggleProps {
+interface SettingsToggleProps {
   onClick: () => void;
 }
 
 const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
-const CustomizerToggle: React.FC<CustomizerToggleProps> = ({ onClick }) => {
+const SettingsToggle: React.FC<SettingsToggleProps> = ({ onClick }) => {
   const [isPointerLocked, setIsPointerLocked] = useState(document.pointerLockElement !== null);
 
   useEffect(() => {
@@ -17,7 +17,7 @@ const CustomizerToggle: React.FC<CustomizerToggleProps> = ({ onClick }) => {
     if (!isMobile) {
         document.addEventListener('pointerlockchange', handlePointerLockChange);
     }
-    
+
     return () => {
       if (!isMobile) {
         document.removeEventListener('pointerlockchange', handlePointerLockChange);
@@ -35,11 +35,11 @@ const CustomizerToggle: React.FC<CustomizerToggleProps> = ({ onClick }) => {
     <button
       onClick={onClick}
       className="bg-gray-700/60 backdrop-blur-sm text-white font-semibold py-2 px-4 rounded-lg border border-gray-600/80 hover:bg-gray-600/80 transition-colors duration-200 select-none"
-      aria-label="Toggle character customizer"
+      aria-label="Toggle audio settings"
     >
-      Customize
+      Settings
     </button>
   );
 };
 
-export default CustomizerToggle;
+export default SettingsToggle;
