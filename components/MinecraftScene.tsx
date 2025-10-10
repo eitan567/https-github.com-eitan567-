@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as THREE from 'three';
 import { MoveVector, CameraMode, CharacterAppearance } from '../App';
@@ -53,9 +54,9 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = (props) => {
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const debugCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const [isPointerLocked, setIsPointerLocked] = useState(false);
+  const ambienceSoundRef = useRef<THREE.Audio | null>(null);
   
   const audioListenerRef = useRef<THREE.AudioListener | null>(null);
-  const windGainRef = useRef<GainNode | null>(null);
   const sfxGainRef = useRef<GainNode | null>(null);
   const musicGainRef = useRef<GainNode | null>(null);
   const birdChirpBufferRef = useRef<AudioBuffer | null>(null);
@@ -105,8 +106,17 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = (props) => {
 
   useEffect(() => {
     if (interacted) {
-        if (audioListenerRef.current && audioListenerRef.current.context.state === 'suspended') {
-            audioListenerRef.current.context.resume().catch(e => console.error("Audio context could not be resumed:", e));
+        const context = audioListenerRef.current?.context;
+        const playAmbientSound = () => {
+            if (ambienceSoundRef.current && !ambienceSoundRef.current.isPlaying && ambienceSoundRef.current.buffer) {
+                ambienceSoundRef.current.play();
+            }
+        };
+
+        if (context && context.state === 'suspended') {
+            context.resume().then(playAmbientSound).catch(e => console.error("Audio context could not be resumed:", e));
+        } else {
+            playAmbientSound();
         }
     }
   }, [interacted]);
@@ -155,6 +165,7 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = (props) => {
     thirdPersonCamera.layers.enable(MOON_LAYER);
     firstPersonCamera.layers.enable(MOON_LAYER);
     const debugCamera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
+    debugCamera.layers.enable(MOON_LAYER);
     debugCameraRef.current = debugCamera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
@@ -223,18 +234,24 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = (props) => {
     musicGainRef.current.gain.value = musicVolume;
     musicGainRef.current.connect(listener.getInput());
 
-    const windNode = audioContext.createBufferSource();
-    const bufferSize = audioContext.sampleRate * 2;
-    const windBuffer = audioContext.createBuffer(1, bufferSize, audioContext.sampleRate);
-    const windData = windBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) { windData[i] = Math.random() * 2 - 1; }
-    windNode.buffer = windBuffer;
-    windNode.loop = true;
-    const windFilter = audioContext.createBiquadFilter();
-    windFilter.type = 'lowpass'; windFilter.frequency.value = 400; windFilter.Q.value = 5;
-    windNode.connect(windFilter);
-    windFilter.connect(musicGainRef.current);
-    windNode.start(0);
+    // --- Ambiance Sound ---
+    const audioLoader = new THREE.AudioLoader();
+    const ambienceSound = new THREE.Audio(listener);
+    ambienceSoundRef.current = ambienceSound;
+
+    audioLoader.load(
+        '/ambience-sounds/village_dusk.mp3',
+        (buffer) => {
+            ambienceSound.setBuffer(buffer);
+            ambienceSound.setLoop(true);
+            if (audioListenerRef.current?.context.state === 'running') {
+                ambienceSound.play();
+            }
+        },
+        undefined, 
+        (error) => console.error('Error loading ambient sound:', error)
+    );
+    ambienceSound.getOutput().connect(musicGainRef.current!);
 
     const createChirpBuffer = (ctx: AudioContext): AudioBuffer => {
         const duration = 0.2;
@@ -1482,7 +1499,9 @@ const MinecraftScene: React.FC<MinecraftSceneProps> = (props) => {
     window.addEventListener('resize', handleResize);
 
     return () => {
-      windNode.stop();
+      if (ambienceSoundRef.current?.isPlaying) {
+        ambienceSoundRef.current.stop();
+      }
       activeVillages.forEach(village => {
         if (village.userData.audio && village.userData.audio.isPlaying) {
           village.userData.audio.stop();
